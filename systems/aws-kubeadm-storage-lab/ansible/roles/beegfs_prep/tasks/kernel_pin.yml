@@ -1,0 +1,104 @@
+---
+# ── Worker: 커널 버전 확인 및 6.8 고정 ────────────────────────────────────────
+# BeeGFS 7.4.6은 커널 6.11까지만 지원. 6.12 이상 커널에서는 클라이언트 모듈 빌드 실패.
+# AWS Ubuntu 24.04가 커널 6.17을 기본 탑재하므로 워커 노드에서 6.8로 다운그레이드 필요.
+
+- name: Get current kernel major.minor (worker)
+  ansible.builtin.set_fact:
+    _kernel_mm: "{{ ansible_facts['kernel'] | regex_replace('^(\\d+\\.\\d+).*', '\\1') }}"
+  when: "'worker' in group_names"
+
+- name: Pin kernel to 6.8 if current kernel >= 6.12 (worker)
+  when:
+    - "'worker' in group_names"
+    - _kernel_mm is version('6.12', '>=')
+  block:
+    - name: Update APT cache for kernel search
+      ansible.builtin.apt:
+        update_cache: yes
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Install kernel 6.8 image and headers
+      ansible.builtin.shell: |
+        IMG=$(apt-cache search 'linux-image-6\.8.*-aws' \
+              | awk '{print $1}' | sort -V | tail -1)
+        HDR=$(apt-cache search 'linux-headers-6\.8.*-aws' \
+              | awk '{print $1}' | sort -V | tail -1)
+        [ -z "$IMG" ] && { echo "ERROR: linux-image-6.8.*-aws 패키지 없음"; exit 1; }
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "$IMG" "$HDR"
+      changed_when: true
+
+    - name: Get exact 6.8 kernel version string
+      ansible.builtin.shell: |
+        dpkg -l | grep 'linux-image-6\.8.*-aws' \
+          | awk '{print $2}' | sed 's/linux-image-//' | sort -V | tail -1
+      register: _kernel_68_ver
+      changed_when: false
+
+    - name: Set GRUB default to 6.8 kernel
+      ansible.builtin.lineinfile:
+        path: /etc/default/grub
+        regexp: '^GRUB_DEFAULT='
+        line: 'GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu, with Linux {{ _kernel_68_ver.stdout }}"'
+
+    - name: Update GRUB
+      ansible.builtin.command: update-grub
+      changed_when: true
+
+    - name: "[1/5] APT preferences — 6.8 외 커널 설치 차단"
+      ansible.builtin.copy:
+        dest: /etc/apt/preferences.d/kernel-68-pin
+        content: |
+          Package: linux-image-6.8.*-aws linux-headers-6.8.*-aws linux-modules-6.8.*-aws linux-modules-extra-6.8.*-aws
+          Pin: release *
+          Pin-Priority: 1001
+
+          Package: linux-image-*-aws linux-headers-*-aws linux-modules-*-aws linux-modules-extra-*-aws
+          Pin: release *
+          Pin-Priority: -1
+
+    - name: "[2/5] apt-mark hold — 6.8 커널 명시적 보호"
+      ansible.builtin.shell: |
+        apt-mark hold \
+          linux-image-{{ _kernel_68_ver.stdout }} \
+          linux-headers-{{ _kernel_68_ver.stdout }} 2>/dev/null || true
+      changed_when: false
+
+    - name: "[3/5] 구버전/고버전 커널 완전 제거"
+      ansible.builtin.shell: |
+        dpkg -l 'linux-image-*-aws' 'linux-headers-*-aws' 'linux-modules-*-aws' 2>/dev/null \
+          | awk '/^ii/{print $2}' | grep -v '{{ _kernel_68_ver.stdout }}' \
+          | xargs -r apt-get remove -y --purge 2>/dev/null || true
+        apt-get autoremove -y
+      changed_when: true
+
+    - name: "[4/5] GRUB savedefault 비활성화 (grub-reboot 무력화)"
+      ansible.builtin.lineinfile:
+        path: /etc/default/grub
+        regexp: '^GRUB_SAVEDEFAULT='
+        line: 'GRUB_SAVEDEFAULT=false'
+        insertafter: '^GRUB_DEFAULT='
+
+    - name: Update GRUB after savedefault change
+      ansible.builtin.command: update-grub
+      changed_when: true
+
+    - name: "[5/5] Unattended-upgrades 커널 자동 업그레이드 차단"
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/99-no-kernel-upgrade
+        content: |
+          Unattended-Upgrade::Package-Blacklist {
+              "linux-image";
+              "linux-headers";
+              "linux-modules";
+              "linux-modules-extra";
+          };
+
+    - name: Reboot into 6.8 kernel
+      reboot:
+        reboot_timeout: 300
+        post_reboot_delay: 15
+
+    - name: Refresh facts after reboot
+      setup:

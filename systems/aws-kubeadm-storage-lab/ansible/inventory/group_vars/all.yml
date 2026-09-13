@@ -1,0 +1,12 @@
+k8s_version: "1.31"
+pod_cidr: "10.244.0.0/16"
+# Ubuntu 24.04 기본 Python 버전 3.12 명시
+ansible_python_interpreter: /usr/bin/python3.12
+
+# AWS 공통 (MetalLB Source/Dest Check 비활성화 등에 사용)
+aws_region: "ap-northeast-2"
+project_name: "k8s-storage-lab"
+
+# 컴포넌트 버전 고정 (K8s 1.31 호환 검증)
+containerd_version: "1.7.22-1"   # Docker apt repo 패키지 버전
+flannel_version: "v0.26.1"       # K8s 1.28+ 지원

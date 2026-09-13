@@ -1,0 +1,107 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+require "fileutils"
+require "ipaddr"
+require "shellwords"
+
+inventory_path = File.join(__dir__, "inventory.ini")
+sections = Hash.new { |hash, key| hash[key] = [] }
+current_section = nil
+
+File.foreach(inventory_path) do |raw_line|
+  line = raw_line.strip
+  next if line.empty? || line.start_with?("#", ";")
+
+  if line.match?(/^\[.+\]$/)
+    current_section = line[1..-2]
+  elsif current_section
+    sections[current_section] << line
+  end
+end
+
+all_vars = sections.fetch("all:vars").to_h do |line|
+  key, value = line.split("=", 2)
+  raise "Invalid [all:vars] entry: #{line}" unless value
+
+  [key.strip, value.strip.gsub(/\A['\"]|['\"]\z/, "")]
+end
+
+nodes = sections.fetch("all").to_h do |line|
+  fields = Shellwords.split(line)
+  inventory_name = fields.shift
+  host_vars = fields.to_h do |field|
+    key, value = field.split("=", 2)
+    raise "Invalid host variable for #{inventory_name}: #{field}" unless value
+
+    [key, value]
+  end
+  [inventory_name, host_vars]
+end
+
+control_plane_nodes = sections.fetch("kube_control_plane")
+storage_nodes = sections.fetch("storage")
+node_network = IPAddr.new(all_vars.fetch("node_network_cidr"))
+metallb_network = IPAddr.new(all_vars.fetch("metallb_address_pool_cidr"))
+
+unless node_network.include?(metallb_network.to_range.first) && node_network.include?(metallb_network.to_range.last)
+  raise "MetalLB range #{metallb_network} must be contained by node network #{node_network}"
+end
+
+nodes.each do |inventory_name, host_vars|
+  node_ip = IPAddr.new(host_vars.fetch("ansible_host"))
+  raise "#{inventory_name} IP #{node_ip} is outside #{node_network}" unless node_network.include?(node_ip)
+  raise "#{inventory_name} IP #{node_ip} overlaps the MetalLB pool #{metallb_network}" if metallb_network.include?(node_ip)
+
+  machine_name = host_vars.fetch("vagrant_machine_name")
+  expected_key = "/vagrant/.vagrant/machines/#{machine_name}/virtualbox/private_key"
+  actual_key = host_vars.fetch("ansible_ssh_private_key_file")
+  raise "#{inventory_name} private-key path must end in #{machine_name}/virtualbox/private_key" unless actual_key == expected_key
+end
+
+cluster_name = all_vars.fetch("cluster_name")
+disk_path = File.join(__dir__, ".vagrant", "disks", cluster_name)
+FileUtils.mkdir_p(disk_path)
+
+Vagrant.configure("2") do |config|
+  nodes.each do |inventory_name, host_vars|
+    machine_name = host_vars.fetch("vagrant_machine_name")
+
+    config.vm.define machine_name do |node|
+      node.vm.box = all_vars.fetch("vagrant_box")
+      node.vm.box_version = all_vars.fetch("vagrant_box_version")
+      node.vm.host_name = host_vars.fetch("vagrant_hostname")
+      node.vm.network "private_network", ip: host_vars.fetch("ansible_host")
+      node.vm.network "forwarded_port", guest: 22, host: host_vars.fetch("vagrant_ssh_port").to_i,
+                      auto_correct: true, id: "ssh"
+
+      node.vm.provider "virtualbox" do |vb|
+        vb.name = machine_name
+        vb.cpus = host_vars.fetch("vagrant_cpus").to_i
+        vb.memory = host_vars.fetch("vagrant_memory_mb").to_i
+        vb.customize ["modifyvm", :id, "--groups", "/#{cluster_name}"]
+
+        if storage_nodes.include?(inventory_name)
+          disk_file = File.join(disk_path, "#{machine_name}.vdi")
+          disk_size_mb = host_vars.fetch("vagrant_disk_gb").to_i * 1024
+          unless File.exist?(disk_file)
+            vb.customize ["createhd", "--filename", disk_file, "--size", disk_size_mb]
+          end
+          vb.customize ["storageattach", :id, "--storagectl", "SATA Controller", "--port", 1,
+                        "--device", 0, "--type", "hdd", "--medium", disk_file]
+          vb.customize ["setextradata", :id,
+                        "VBoxInternal/Devices/ahci/0/Config/Port1/NonRotational", "1"]
+        end
+      end
+
+      node.vm.provision "shell", path: "./common/config.sh"
+
+      if control_plane_nodes.include?(inventory_name)
+        node.vm.provision "shell", path: "./master_node/kubespray.sh", privileged: false
+        node.vm.provision "shell", path: "./master_node/ceph.sh", privileged: false
+        # node.vm.provision "shell", path: "./master_node/jenkins.sh", privileged: false
+        # node.vm.provision "shell", path: "./master_node/monitoring.sh", privileged: false
+      end
+    end
+  end
+end

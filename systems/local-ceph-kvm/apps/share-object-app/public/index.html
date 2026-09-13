@@ -1,0 +1,901 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <title>Ceph Storage File Browser</title>
+    <link rel="icon" type="image/x-icon" id="cdFavicon" href="favicon.ico">
+    <style>
+        :root {
+            --white: #fff;
+            --gray-100: #f8f9fa;
+            --gray-200: #e9ecef;
+            --gray-300: #dee2e6;
+            --gray-400: #ced4da;
+            --gray-500: #adb5bd;
+            --gray-600: #6c757d;
+            --gray-700: #495057;
+            --gray-800: #343a40;
+            --gray-900: #212529;
+            --black: #000;
+            
+            /* Dark theme colors */
+            --dark-bg: #2d3741;
+            --dark-bg-lighter: #374249;
+            --dark-bg-input: #3d4955;
+            --dark-text: #ffffff;
+            --dark-text-secondary: #adb5bd;
+            --dark-border: #4a5561;
+            
+            /* Accent colors */
+            --primary: #25828e;
+            --primary-500: #2b99a8;
+            --secondary: #374249;
+            --success: #008a00;
+            --info: #25828e;
+            --warning: #d48200;
+            --danger: #dc3545;
+            --accent: #25828e;
+            
+            --font-family-sans-serif: "Helvetica Neue", Helvetica, Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html, body {
+            font-family: var(--font-family-sans-serif);
+            font-size: 13px;
+            height: 100%;
+            width: 100%;
+            margin: 0;
+            padding: 0;
+            color: var(--dark-text);
+            background-color: var(--dark-bg);
+            line-height: 1.5;
+        }
+
+        .app-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: var(--dark-bg);
+            min-height: 100%;
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--dark-border);
+        }
+
+        .header h1 {
+            color: var(--dark-text);
+            margin: 0;
+            font-size: 24px;
+        }
+
+        .version-label {
+            font-size: 12px;
+            color: var(--dark-text-secondary);
+            margin-left: 8px;
+            vertical-align: middle;
+        }
+
+        .card {
+            background-color: var(--dark-bg-lighter);
+            border-radius: 6px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+            margin-bottom: 20px;
+            overflow: hidden;
+            border: 1px solid var(--dark-border);
+        }
+
+        .card-header {
+            background-color: rgba(0, 0, 0, 0.2);
+            padding: 15px 20px;
+            border-bottom: 1px solid var(--dark-border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .card-header h2 {
+            margin: 0;
+            font-size: 16px;
+            color: var(--dark-text);
+            font-weight: 500;
+        }
+
+        .card-body {
+            padding: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            color: var(--dark-text);
+        }
+
+        input[type="text"],
+        input[type="password"] {
+            width: 100%;
+            padding: 10px;
+            background-color: var(--dark-bg-input);
+            border: 1px solid var(--dark-border);
+            border-radius: 4px;
+            font-size: 14px;
+            color: var(--dark-text);
+            transition: border-color 0.15s ease-in-out;
+        }
+
+        input[type="text"]:focus,
+        input[type="password"]:focus {
+            border-color: var(--primary);
+            outline: 0;
+            box-shadow: 0 0 0 2px rgba(37, 130, 142, 0.25);
+        }
+
+        .btn {
+            display: inline-block;
+            font-weight: 500;
+            text-align: center;
+            vertical-align: middle;
+            cursor: pointer;
+            padding: 8px 16px;
+            font-size: 14px;
+            line-height: 1.5;
+            border-radius: 4px;
+            border: 1px solid transparent;
+            transition: color 0.15s ease-in-out, background-color 0.15s ease-in-out, border-color 0.15s ease-in-out;
+            margin-right: 8px;
+        }
+
+        .btn-primary {
+            color: var(--white);
+            background-color: var(--primary);
+            border-color: var(--primary);
+        }
+
+        .btn-primary:hover {
+            background-color: var(--primary-500);
+            border-color: var(--primary-500);
+        }
+
+        .btn-primary:disabled {
+            background-color: var(--dark-bg-lighter);
+            border-color: var(--dark-border);
+            cursor: not-allowed;
+            opacity: 0.65;
+        }
+
+        .btn-danger {
+            color: var(--white);
+            background-color: var(--danger);
+            border-color: var(--danger);
+        }
+
+        .btn-danger:hover {
+            background-color: #c82333;
+            border-color: #bd2130;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 15px;
+        }
+
+        .bucket-item {
+            background-color: var(--dark-bg-lighter);
+            border: 1px solid var(--dark-border);
+            border-radius: 6px;
+            padding: 15px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .bucket-item:hover {
+            border-color: var(--primary);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+        }
+
+        .bucket-item.active {
+            border-color: var(--primary);
+            background-color: rgba(37, 130, 142, 0.2);
+        }
+
+        .bucket-item h3 {
+            margin: 0 0 10px 0;
+            font-size: 15px;
+            display: flex;
+            align-items: center;
+            color: var(--dark-text);
+        }
+
+        .bucket-item p {
+            margin: 0;
+            font-size: 13px;
+            color: var(--dark-text-secondary);
+        }
+
+        .icon {
+            margin-right: 8px;
+            color: var(--primary);
+        }
+
+        .file-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .file-table th,
+        .file-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--dark-border);
+        }
+
+        .file-table th {
+            background-color: rgba(0, 0, 0, 0.2);
+            font-weight: 500;
+            color: var(--dark-text);
+        }
+
+        .file-table tbody tr:hover {
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+
+        .file-name {
+            display: flex;
+            align-items: center;
+            word-break: break-word;
+        }
+
+        .upload-zone {
+            margin-top: 20px;
+            padding: 30px;
+            border: 2px dashed var(--dark-border);
+            border-radius: 6px;
+            text-align: center;
+            min-height: 150px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            transition: all 0.2s;
+            background-color: rgba(0, 0, 0, 0.1);
+        }
+
+        .upload-zone.dragover {
+            border-color: var(--primary);
+            background-color: rgba(37, 130, 142, 0.2);
+        }
+
+        .upload-zone p {
+            margin: 0 0 15px 0;
+            font-size: 15px;
+            color: var(--dark-text);
+        }
+
+        .file-input {
+            display: none;
+        }
+
+        .progress-container {
+            width: 100%;
+            background-color: rgba(0, 0, 0, 0.2);
+            border-radius: 4px;
+            margin-top: 15px;
+            display: none;
+        }
+
+        .progress-bar {
+            height: 25px;
+            background-color: var(--primary);
+            border-radius: 4px;
+            text-align: center;
+            line-height: 25px;
+            color: var(--white);
+            width: 0%;
+            transition: width 0.3s ease;
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .selected-files {
+            margin-top: 15px;
+            text-align: left;
+            width: 100%;
+        }
+
+        .alert {
+            padding: 12px 15px;
+            margin-bottom: 15px;
+            border: 1px solid transparent;
+            border-radius: 4px;
+        }
+
+        .alert-danger {
+            color: #f8d7da;
+            background-color: rgba(220, 53, 69, 0.2);
+            border-color: rgba(220, 53, 69, 0.5);
+        }
+
+        .alert-success {
+            color: #d4edda;
+            background-color: rgba(0, 138, 0, 0.2);
+            border-color: rgba(0, 138, 0, 0.5);
+        }
+
+        .footer {
+            text-align: center;
+            padding: 15px 0;
+            color: var(--dark-text-secondary);
+            font-size: 12px;
+            border-top: 1px solid var(--dark-border);
+            margin-top: 30px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 30px;
+            color: var(--dark-text-secondary);
+        }
+
+        .actions {
+            display: flex;
+            gap: 5px;
+        }
+
+        .upload-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .logo {
+            max-width: 150px;
+            margin-left: auto;
+        }
+
+        /* For password visibility toggle */
+        .password-field {
+            position: relative;
+        }
+
+        .password-toggle {
+            position: absolute;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: none;
+            border: none;
+            color: var(--dark-text-secondary);
+            cursor: pointer;
+        }
+
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            }
+            
+            .file-table {
+                font-size: 12px;
+            }
+            
+            .card-body {
+                padding: 15px;
+            }
+            
+            .actions {
+                flex-direction: column;
+                gap: 5px;
+            }
+            
+            .btn {
+                padding: 6px 12px;
+                font-size: 13px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <header class="header">
+            <div>
+                <h1>Ceph Storage File Browser <span class="version-label">v3.0</span></h1>
+            </div>
+            <img src="./ceph.svg" alt="Ceph Logo" class="logo">
+        </header>
+
+        <!-- Connection Form -->
+        <div id="connectionForm" class="card">
+            <div class="card-header">
+                <h2>Connect to Ceph Storage</h2>
+            </div>
+            <div class="card-body">
+                <div class="form-group">
+                    <label for="endpoint">Endpoint URL</label>
+                    <input type="text" id="endpoint" value="http://192.168.0.180:7480" placeholder="http://192.168.0.180:7480">
+                </div>
+                <div class="form-group">
+                    <label for="accessKeyId">Access Key ID</label>
+                    <input type="text" id="accessKeyId" placeholder="Enter your access key ID">
+                </div>
+                <div class="form-group password-field">
+                    <label for="secretAccessKey">Secret Access Key</label>
+                    <input type="password" id="secretAccessKey" placeholder="Enter your secret key">
+                    <button type="button" class="password-toggle" onclick="togglePasswordVisibility()">👁️</button>
+                </div>
+                <button id="connectBtn" class="btn btn-primary">Connect</button>
+                <div id="error" class="alert alert-danger" style="display: none;"></div>
+            </div>
+        </div>
+
+        <!-- Bucket List -->
+        <div id="bucketList" class="card" style="display: none;">
+            <div class="card-header">
+                <h2>Select Bucket</h2>
+            </div>
+            <div class="card-body">
+                <div id="buckets" class="grid"></div>
+            </div>
+        </div>
+        
+        <!-- File List -->
+        <div id="fileList" class="card" style="display: none;">
+            <div class="card-header">
+                <h2>Files in <span id="currentBucket"></span></h2>
+                <button id="refreshBtn" class="btn btn-primary">Refresh</button>
+            </div>
+            <div class="card-body">
+                <!-- Upload Section -->
+                <div class="upload-zone" id="uploadSection">
+                    <p>Drag and drop files here or click to select files</p>
+                    <input type="file" id="fileInput" class="file-input" multiple>
+                    <div class="upload-actions">
+                        <button id="selectFilesBtn" class="btn btn-primary">Select Files</button>
+                        <button id="uploadBtn" class="btn btn-primary" disabled>Upload Files</button>
+                    </div>
+                    <div id="selectedFiles" class="selected-files"></div>
+                    <div class="progress-container" id="progressContainer">
+                        <div class="progress-bar" id="progressBar">0%</div>
+                    </div>
+                </div>
+                
+                <div id="uploadMessage" style="display: none;"></div>
+                <div id="files"></div>
+            </div>
+        </div>
+
+        <footer class="footer">
+            <p>Developed by PSI and Claude • Ceph Storage File Browser</p>
+        </footer>
+    </div>
+
+    <script>
+        let clientId = null;
+        let currentBucket = null;
+        let selectedFiles = [];
+
+        // Error handling functions
+        function showError(message) {
+            const errorDiv = document.getElementById('error');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+        }
+
+        function hideError() {
+            document.getElementById('error').style.display = 'none';
+        }
+
+        function showMessage(message, isError = false) {
+            const messageDiv = document.getElementById('uploadMessage');
+            messageDiv.textContent = message;
+            messageDiv.className = isError ? 'alert alert-danger' : 'alert alert-success';
+            messageDiv.style.display = 'block';
+            setTimeout(() => {
+                messageDiv.style.display = 'none';
+            }, 5000);
+        }
+
+        // Connection function
+        async function connect() {
+            hideError();
+            const connectBtn = document.getElementById('connectBtn');
+            connectBtn.disabled = true;
+            connectBtn.textContent = 'Connecting...';
+
+            const endpoint = document.getElementById('endpoint').value;
+            const accessKeyId = document.getElementById('accessKeyId').value;
+            const secretAccessKey = document.getElementById('secretAccessKey').value;
+
+            try {
+                const response = await fetch('/api/connect', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ 
+                        endpoint, 
+                        accessKeyId,
+                        secretAccessKey
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    clientId = data.clientId;
+                    document.getElementById('connectionForm').style.display = 'none';
+                    document.getElementById('bucketList').style.display = 'block';
+                    displayBuckets(data.buckets);
+                } else {
+                    showError(data.error || 'Connection failed');
+                }
+            } catch (error) {
+                showError('Failed to connect to server');
+            } finally {
+                connectBtn.disabled = false;
+                connectBtn.textContent = 'Connect';
+            }
+        }
+
+        // Display buckets
+        function displayBuckets(buckets) {
+            const bucketsDiv = document.getElementById('buckets');
+            bucketsDiv.innerHTML = '';
+
+            buckets.forEach(bucket => {
+                const bucketDiv = document.createElement('div');
+                bucketDiv.className = 'bucket-item';
+                bucketDiv.innerHTML = `
+                    <h3><span class="icon">📁</span>${bucket.Name}</h3>
+                    <p>Created: ${new Date(bucket.CreationDate).toLocaleDateString()}</p>
+                `;
+                bucketDiv.addEventListener('click', () => selectBucket(bucket.Name));
+                bucketsDiv.appendChild(bucketDiv);
+            });
+        }
+
+        // Select bucket
+        async function selectBucket(bucketName) {
+            currentBucket = bucketName;
+            document.getElementById('currentBucket').textContent = bucketName;
+            
+            // Update UI
+            document.querySelectorAll('.bucket-item').forEach(card => {
+                if (card.querySelector('h3').textContent.includes(bucketName)) {
+                    card.classList.add('active');
+                } else {
+                    card.classList.remove('active');
+                }
+            });
+
+            document.getElementById('fileList').style.display = 'block';
+            await loadFiles(bucketName);
+        }
+
+        // Load files
+        async function loadFiles(bucketName) {
+            const filesDiv = document.getElementById('files');
+            filesDiv.innerHTML = '<div class="loading">Loading files...</div>';
+
+            try {
+                const response = await fetch(`/api/bucket/${bucketName}/files`, {
+                    headers: {
+                        'X-Client-ID': clientId
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    displayFiles(data.files);
+                } else {
+                    filesDiv.innerHTML = `<div class="alert alert-danger">${data.error || 'Failed to load files'}</div>`;
+                }
+            } catch (error) {
+                filesDiv.innerHTML = '<div class="alert alert-danger">Failed to load files</div>';
+            }
+        }
+
+        // Display files
+        function displayFiles(files) {
+            const filesDiv = document.getElementById('files');
+
+            if (files.length === 0) {
+                filesDiv.innerHTML = '<p>No files in this bucket</p>';
+                return;
+            }
+
+            const table = document.createElement('table');
+            table.className = 'file-table';
+            table.innerHTML = `
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Size</th>
+                        <th>Last Modified</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${files.map(file => `
+                        <tr>
+                            <td><div class="file-name"><span class="icon">📄</span>${file.key}</div></td>
+                            <td>${formatFileSize(file.size)}</td>
+                            <td>${new Date(file.lastModified).toLocaleString()}</td>
+                            <td>
+                                <div class="actions">
+                                    <button onclick="downloadFile('${encodeURIComponent(file.key)}')" class="btn btn-primary">Download</button>
+                                    <button onclick="deleteFile('${encodeURIComponent(file.key)}')" class="btn btn-danger">Delete</button>
+                                </div>
+                            </td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            `;
+            filesDiv.innerHTML = '';
+            filesDiv.appendChild(table);
+        }
+
+        // Download file
+        async function downloadFile(encodedFileKey) {
+            const fileKey = decodeURIComponent(encodedFileKey);
+            try {
+                const response = await fetch(`/api/bucket/${currentBucket}/file/${encodedFileKey}/download-url`, {
+                    headers: {
+                        'X-Client-ID': clientId
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    window.location.href = data.url;
+                } else {
+                    alert(data.error || 'Failed to download file');
+                }
+            } catch (error) {
+                console.error('Download error:', error);
+                alert('Failed to download file');
+            }
+        }
+
+        // Delete file
+        async function deleteFile(encodedFileKey) {
+            const fileKey = decodeURIComponent(encodedFileKey);
+            if (!confirm(`Are you sure you want to delete "${fileKey}"? This action cannot be undone.`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/bucket/${currentBucket}/file/${encodedFileKey}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'X-Client-ID': clientId
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showMessage(`Successfully deleted "${fileKey}"`);
+                    refreshFiles();
+                } else {
+                    showMessage(data.error || 'Failed to delete file', true);
+                }
+            } catch (error) {
+                showMessage('Failed to delete file', true);
+            }
+        }
+
+        // Refresh files
+        function refreshFiles() {
+            if (currentBucket) {
+                loadFiles(currentBucket);
+            }
+        }
+
+        // Format file size
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
+        }
+
+        // Upload file with progress
+        function uploadFileWithProgress(file) {
+            return new Promise((resolve, reject) => {
+                const formData = new FormData();
+                formData.append('file', file);
+
+                const xhr = new XMLHttpRequest();
+                const progressBar = document.getElementById('progressBar');
+
+                // Progress event listener
+                xhr.upload.addEventListener('progress', (e) => {
+                    if (e.lengthComputable) {
+                        const percentComplete = Math.round((e.loaded / e.total) * 100);
+                        progressBar.style.width = percentComplete + '%';
+                        progressBar.textContent = `${file.name}: ${percentComplete}%`;
+                    }
+                });
+
+                // Load event
+                xhr.addEventListener('load', () => {
+                    if (xhr.status === 200) {
+                        const response = JSON.parse(xhr.responseText);
+                        if (response.success) {
+                            resolve(response);
+                        } else {
+                            reject(new Error(response.error || 'Upload failed'));
+                        }
+                    } else {
+                        reject(new Error(`HTTP Error: ${xhr.status}`));
+                    }
+                });
+
+                // Error event
+                xhr.addEventListener('error', () => {
+                    reject(new Error('Network error occurred'));
+                });
+
+                // Timeout event
+                xhr.addEventListener('timeout', () => {
+                    reject(new Error('Upload timed out'));
+                });
+
+                // Request setup
+                xhr.open('POST', `/api/bucket/${currentBucket}/upload`);
+                xhr.setRequestHeader('X-Client-ID', clientId);
+                xhr.timeout = 600000; // 10 minute timeout
+                
+                // Send request
+                xhr.send(formData);
+            });
+        }
+
+        // Upload files
+        async function uploadFiles() {
+            if (selectedFiles.length === 0 || !currentBucket) return;
+
+            const uploadBtn = document.getElementById('uploadBtn');
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = 'Uploading...';
+
+            const progressContainer = document.getElementById('progressContainer');
+            const progressBar = document.getElementById('progressBar');
+            progressContainer.style.display = 'block';
+
+            let uploadedCount = 0;
+            const totalFiles = selectedFiles.length;
+
+            for (const file of selectedFiles) {
+                try {
+                    await uploadFileWithProgress(file);
+                    uploadedCount++;
+                } catch (error) {
+                    showMessage(`Failed to upload ${file.name}: ${error.message}`, true);
+                }
+            }
+
+            uploadBtn.disabled = false;
+            uploadBtn.textContent = 'Upload Files';
+            selectedFiles = [];
+            document.getElementById('fileInput').value = '';
+            displaySelectedFiles();
+            
+            setTimeout(() => {
+                progressContainer.style.display = 'none';
+                progressBar.style.width = '0%';
+                progressBar.textContent = '0%';
+            }, 2000);
+
+            showMessage(`Successfully uploaded ${uploadedCount} of ${totalFiles} files`);
+            refreshFiles();
+        }
+
+        // Display selected files
+        function displaySelectedFiles() {
+            const selectedFilesDiv = document.getElementById('selectedFiles');
+            const maxSize = 1024 * 1024 * 1024; // 1GB
+            
+            if (selectedFiles.length === 0) {
+                selectedFilesDiv.innerHTML = '';
+                document.getElementById('uploadBtn').disabled = true;
+            } else {
+                let validFiles = [];
+                let invalidFiles = [];
+                
+                selectedFiles.forEach(file => {
+                    if (file.size > maxSize) {
+                        invalidFiles.push(`${file.name} (${formatFileSize(file.size)}) - exceeds 1GB limit`);
+                    } else {
+                        validFiles.push(`${file.name} (${formatFileSize(file.size)})`);
+                    }
+                });
+                
+                let message = '';
+                if (validFiles.length > 0) {
+                    message += `<p><strong>Selected files:</strong><br>${validFiles.join('<br>')}</p>`;
+                }
+                if (invalidFiles.length > 0) {
+                    message += `<p class="alert alert-danger"><strong>Files too large (max 1GB):</strong><br>${invalidFiles.join('<br>')}</p>`;
+                }
+                
+                selectedFilesDiv.innerHTML = message;
+                
+                // Keep only valid files in selectedFiles array
+                selectedFiles = selectedFiles.filter(file => file.size <= maxSize);
+                document.getElementById('uploadBtn').disabled = selectedFiles.length === 0;
+                
+                if (selectedFiles.length === 0 && invalidFiles.length > 0) {
+                    document.getElementById('uploadBtn').textContent = 'No Valid Files';
+                }
+            }
+        }
+
+        // Event listeners
+        document.getElementById('connectBtn').addEventListener('click', connect);
+        document.getElementById('refreshBtn').addEventListener('click', refreshFiles);
+        document.getElementById('selectFilesBtn').addEventListener('click', () => {
+            document.getElementById('fileInput').click();
+        });
+        document.getElementById('uploadBtn').addEventListener('click', uploadFiles);
+
+        document.getElementById('fileInput').addEventListener('change', function(e) {
+            selectedFiles = Array.from(e.target.files);
+            displaySelectedFiles();
+        });
+
+        // Make downloadFile and deleteFile accessible globally for onclick handlers
+        window.downloadFile = downloadFile;
+        window.deleteFile = deleteFile;
+
+        // Toggle password visibility
+        function togglePasswordVisibility() {
+            const passwordInput = document.getElementById('secretAccessKey');
+            const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
+            passwordInput.setAttribute('type', type);
+        }
+        
+        // Make togglePasswordVisibility accessible globally
+        window.togglePasswordVisibility = togglePasswordVisibility;
+
+        // Drag and drop functionality
+        const uploadSection = document.getElementById('uploadSection');
+
+        uploadSection.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadSection.classList.add('dragover');
+        });
+
+        uploadSection.addEventListener('dragleave', () => {
+            uploadSection.classList.remove('dragover');
+        });
+
+        uploadSection.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadSection.classList.remove('dragover');
+            
+            const files = Array.from(e.dataTransfer.files);
+            selectedFiles = files;
+            displaySelectedFiles();
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,132 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+require "fileutils"
+require "ipaddr"
+require "shellwords"
+
+inventory_path = File.join(__dir__, "inventory.ini")
+sections = Hash.new { |hash, key| hash[key] = [] }
+current_section = nil
+
+File.foreach(inventory_path) do |raw_line|
+  line = raw_line.strip
+  next if line.empty? || line.start_with?("#", ";")
+
+  if line.match?(/^\[.+\]$/)
+    current_section = line[1..-2]
+  elsif current_section
+    sections[current_section] << line
+  end
+end
+
+all_vars = sections.fetch("all:vars").to_h do |line|
+  key, value = line.split("=", 2)
+  raise "Invalid [all:vars] entry: #{line}" unless value
+
+  [key.strip, value.strip.gsub(/\A['\"]|['\"]\z/, "")]
+end
+
+nodes = sections.fetch("all").to_h do |line|
+  fields = Shellwords.split(line)
+  inventory_name = fields.shift
+  host_vars = fields.to_h do |field|
+    key, value = field.split("=", 2)
+    raise "Invalid host variable for #{inventory_name}: #{field}" unless value
+
+    [key, value]
+  end
+  [inventory_name, host_vars]
+end
+
+raise "This reduced lab must define exactly one node" unless nodes.length == 1
+
+allowed_network = IPAddr.new(all_vars.fetch("allowed_lab_network_cidr"))
+management_network = IPAddr.new(all_vars.fetch("management_network_cidr"))
+ces_network = IPAddr.new(all_vars.fetch("ces_network_cidr"))
+ces_ip = IPAddr.new(all_vars.fetch("ces_ip"))
+
+[management_network, ces_network].each do |network|
+  unless allowed_network.include?(network.to_range.first) && allowed_network.include?(network.to_range.last)
+    raise "Network #{network} must stay inside repository range #{allowed_network}"
+  end
+end
+raise "Management and CES networks must not overlap" if management_network.include?(ces_network.to_range.first)
+raise "CES IP #{ces_ip} is outside #{ces_network}" unless ces_network.include?(ces_ip)
+
+nodes.each do |inventory_name, host_vars|
+  management_ip = IPAddr.new(host_vars.fetch("ansible_host"))
+  ces_base_ip = IPAddr.new(host_vars.fetch("ces_base_ip"))
+  raise "#{inventory_name} management IP is outside #{management_network}" unless management_network.include?(management_ip)
+  raise "#{inventory_name} CES base IP is outside #{ces_network}" unless ces_network.include?(ces_base_ip)
+  raise "CES service IP must differ from the CES base IP" if ces_ip == ces_base_ip
+  raise "CES service IP must not be the GPFS management IP" if ces_ip == management_ip
+end
+
+opt_in_env = all_vars.fetch("unsupported_opt_in_env")
+checksum_env = all_vars.fetch("installer_sha256_env")
+provision_env = {
+  opt_in_env => ENV.fetch(opt_in_env, ""),
+  checksum_env => ENV.fetch(checksum_env, "")
+}
+
+$stderr.puts <<~BANNER
+
+  ================================================================================
+  UNSUPPORTED EXPERIMENTAL LAB: IBM SUPPORT IS NOT AVAILABLE FOR THIS COMBINATION.
+  Deviation 1: Rocky Linux 9 replaces the supported RHEL 9.8 platform.
+  Deviation 2: one 16 GiB node replaces the three-node, 64 GiB-per-node baseline.
+  This lab has no quorum redundancy, no CES IP failover, and no data redundancy.
+  ================================================================================
+BANNER
+
+unless ENV.fetch(opt_in_env, "") == all_vars.fetch("unsupported_opt_in_value")
+  $stderr.puts "Provisioning will stop until #{opt_in_env} has the exact documented opt-in value."
+end
+
+disk_root = File.join(__dir__, ".vagrant", "disks", all_vars.fetch("cluster_name"))
+FileUtils.mkdir_p(disk_root)
+
+Vagrant.configure("2") do |config|
+  nodes.each do |_inventory_name, host_vars|
+    machine_name = host_vars.fetch("vagrant_machine_name")
+
+    config.vm.define machine_name do |node|
+      node.vm.box = all_vars.fetch("vagrant_box")
+      node.vm.box_version = all_vars.fetch("vagrant_box_version")
+      node.vm.hostname = host_vars.fetch("vagrant_hostname")
+      node.vm.network "private_network", ip: host_vars.fetch("ansible_host")
+      node.vm.network "private_network", ip: host_vars.fetch("ces_base_ip")
+      node.vm.network "forwarded_port", guest: 22, host: host_vars.fetch("vagrant_ssh_port").to_i,
+                      auto_correct: true, id: "ssh"
+
+      node.vm.provider "virtualbox" do |vb|
+        vb.name = machine_name
+        vb.cpus = host_vars.fetch("vagrant_cpus").to_i
+        vb.memory = host_vars.fetch("vagrant_memory_mb").to_i
+        vb.customize ["modifyvm", :id, "--groups", "/#{all_vars.fetch('cluster_name')}"]
+
+        [
+          ["ces-root", host_vars.fetch("ces_root_disk_gb").to_i, 1],
+          ["s3-data", host_vars.fetch("s3_data_disk_gb").to_i, 2]
+        ].each do |label, size_gb, port|
+          disk_file = File.join(disk_root, "#{machine_name}-#{label}.vdi")
+          unless File.exist?(disk_file)
+            vb.customize ["createhd", "--filename", disk_file, "--size", size_gb * 1024]
+          end
+          vb.customize ["storageattach", :id, "--storagectl", "SATA Controller", "--port", port,
+                        "--device", 0, "--type", "hdd", "--medium", disk_file]
+          vb.customize ["setextradata", :id,
+                        "VBoxInternal/Devices/ahci/0/Config/Port#{port}/NonRotational", "1"]
+        end
+      end
+
+      node.vm.provision "shell", path: "./scripts/00-preflight.sh", env: provision_env
+      node.vm.provision "shell", path: "./scripts/10-os-kernel.sh", env: provision_env, reboot: true
+      node.vm.provision "shell", path: "./scripts/20-install-scale.sh", env: provision_env
+      node.vm.provision "shell", path: "./scripts/30-configure-s3.sh", env: provision_env
+      node.vm.provision "shell", path: "./scripts/40-verify-s3.sh", env: provision_env
+    end
+  end
+end
+

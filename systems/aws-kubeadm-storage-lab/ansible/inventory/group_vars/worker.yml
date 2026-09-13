@@ -1,0 +1,10 @@
+extra_packages:
+  - lvm2
+  - chrony
+  - linux-modules-extra-aws
+  - xfsprogs
+  - nvme-cli
+
+ceph_modules:
+  - rbd
+  - ceph

@@ -1,0 +1,219 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+#
+# local-ceph-kvm — libvirt/KVM provider 로 구성하는 단일 monitor Ceph 실습 클러스터.
+# VirtualBox 로 같은 클러스터를 올리는 local-ceph-vagrant 와는 별개의 클러스터
+# 정의이며 두 시스템은 통합하지 않는다. 차이점은 README.md 를 참고한다.
+
+# worker 프로비저닝과 private key 생성이 끝난 뒤 master를 프로비저닝한다.
+ENV['VAGRANT_NO_PARALLEL'] = 'yes'
+
+# inventory/inventory.ini is the source of truth for host addresses, OSD devices,
+# the public/cluster networks, the Ceph release, and mon/mgr counts.
+INVENTORY_PATH = File.expand_path("inventory/inventory.ini", File.dirname(__FILE__))
+
+def parse_inventory(path)
+  raise "인벤토리 파일을 찾을 수 없습니다: #{path}" unless File.exist?(path)
+
+  hosts = {}
+  vars = {}
+  section = nil
+
+  File.readlines(path).each do |raw|
+    line = raw.strip
+    next if line.empty? || line.start_with?("#", ";")
+
+    if line.start_with?("[")
+      section = line.delete("[]")
+      next
+    end
+
+    if section.to_s.end_with?(":vars")
+      key, value = line.split("=", 2)
+      vars[key.strip] = value.to_s.strip unless value.nil?
+      next
+    end
+
+    fields = line.split(/\s+/)
+    host = fields.shift
+    attrs = {}
+    fields.each do |field|
+      key, value = field.split("=", 2)
+      attrs[key] = value unless value.nil?
+    end
+    hosts[host] = attrs unless attrs.empty?
+  end
+
+  { :hosts => hosts, :vars => vars }
+end
+
+INVENTORY = parse_inventory(INVENTORY_PATH)
+
+def inventory_var!(name)
+  value = INVENTORY[:vars][name]
+  if value.nil? || value.empty?
+    raise "인벤토리 [ceph:vars] 에 #{name} 선언이 없습니다: #{INVENTORY_PATH}"
+  end
+  value
+end
+
+def cidr_prefix(cidr)
+  unless cidr.match?(%r{\A(?:\d{1,3}\.){3}\d{1,3}/24\z})
+    raise "이 실습은 /24 IPv4 CIDR만 지원합니다: #{cidr}"
+  end
+  cidr.split("/").first.split(".")[0, 3].join(".")
+end
+
+def in_network?(ip, cidr)
+  ip.split(".")[0, 3].join(".") == cidr_prefix(cidr)
+end
+
+CEPH_PUBLIC_NETWORK = inventory_var!("ceph_public_network")
+CEPH_CLUSTER_NETWORK = inventory_var!("ceph_cluster_network")
+
+if CEPH_PUBLIC_NETWORK == CEPH_CLUSTER_NETWORK
+  raise "ceph_public_network 와 ceph_cluster_network 가 같은 CIDR(#{CEPH_PUBLIC_NETWORK}) 입니다. " \
+        "두 네트워크는 분리되어야 합니다: #{INVENTORY_PATH}"
+end
+
+def node_ips!(hostname)
+  attrs = INVENTORY[:hosts][hostname]
+  raise "인벤토리에 #{hostname} 호스트 항목이 없습니다: #{INVENTORY_PATH}" if attrs.nil?
+
+  public_ip = attrs["ansible_host"]
+  cluster_ip = attrs["cluster_ip"]
+  raise "#{hostname}: ansible_host(public IP) 선언이 없습니다" if public_ip.nil?
+  raise "#{hostname}: cluster_ip 선언이 없습니다" if cluster_ip.nil?
+  if attrs.key?("public_ip") && attrs["public_ip"] != public_ip
+    raise "#{hostname}: public_ip(#{attrs['public_ip']})와 ansible_host(#{public_ip})가 다릅니다"
+  end
+  unless in_network?(public_ip, CEPH_PUBLIC_NETWORK)
+    raise "#{hostname}: public IP #{public_ip} 가 #{CEPH_PUBLIC_NETWORK} 에 속하지 않습니다"
+  end
+  unless in_network?(cluster_ip, CEPH_CLUSTER_NETWORK)
+    raise "#{hostname}: cluster IP #{cluster_ip} 가 #{CEPH_CLUSTER_NETWORK} 에 속하지 않습니다"
+  end
+
+  { :public => public_ip, :cluster => cluster_ip }
+end
+
+NETWORK_CONFIG = {
+  :master_ip => node_ips!("ceph-master")[:public],
+  :network_prefix => cidr_prefix(CEPH_PUBLIC_NETWORK),
+  :cluster_network_prefix => cidr_prefix(CEPH_CLUSTER_NETWORK)
+}
+
+# Only devices declared as osd_devices in the inventory may be created or used.
+OSD_DEVICES_BY_HOST = {}
+INVENTORY[:hosts].each do |host, attrs|
+  next unless attrs.key?("osd_devices")
+  devices = attrs["osd_devices"].split(",").map { |device| device.strip }.reject { |device| device.empty? }
+  raise "#{host}: osd_devices 선언이 비어 있습니다: #{INVENTORY_PATH}" if devices.empty?
+  OSD_DEVICES_BY_HOST[host] = devices
+end
+raise "osd_devices 를 선언한 storage 호스트가 없습니다: #{INVENTORY_PATH}" if OSD_DEVICES_BY_HOST.empty?
+
+# cephadm-setup.sh currently accepts one CSV shared by every storage host. Fail
+# before VM creation if per-host declarations differ instead of using the wrong disk.
+OSD_DEVICE_LISTS = OSD_DEVICES_BY_HOST.values.uniq
+if OSD_DEVICE_LISTS.length > 1
+  raise "storage 호스트마다 osd_devices 목록이 다릅니다(#{OSD_DEVICE_LISTS.inspect}). " \
+        "현재 cephadm-setup.sh 계약에서는 목록이 같아야 합니다: #{INVENTORY_PATH}"
+end
+CEPH_OSD_DEVICES = OSD_DEVICE_LISTS.first
+expected_kvm_devices = CEPH_OSD_DEVICES.each_index.map { |i| "/dev/vd#{('b'.ord + i).chr}" }
+if CEPH_OSD_DEVICES != expected_kvm_devices
+  raise "libvirt virtio OSD 디스크는 #{expected_kvm_devices.join(',')} 순서로 선언해야 합니다. " \
+        "현재 값: #{CEPH_OSD_DEVICES.join(',')} (#{INVENTORY_PATH})"
+end
+
+# Provider-local facts stay here; cluster facts above come from the inventory.
+VERSION_CONFIG = {
+  :ubuntu_box => "cloud-image/ubuntu-24.04",
+  :ceph => inventory_var!("ceph_version")
+}
+
+CLUSTER_NAME = "ceph-cluster"
+CEPH_CLUSTER = {
+  "ceph-worker-1" => { :cpus => 4, :memory => 4096 },
+  "ceph-worker-2" => { :cpus => 4, :memory => 4096 },
+  "ceph-master" => { :cpus => 6, :memory => 6144 }
+}
+CEPH_WORKER_NODES = CEPH_CLUSTER.length - 1
+
+# mon_count=1 / mgr_count=2 is intentional. This is a single-monitor, non-HA
+# lab: loss of ceph-master loses monitor quorum. Do not mistake two managers for HA.
+CEPH_SERVICES = {
+  :mon_count => inventory_var!("mon_count").to_i,
+  :mgr_count => inventory_var!("mgr_count").to_i,
+  :mds_count => 2
+}
+
+# libvirt creates one raw virtio volume for each declared OSD device.
+CEPH_OSD = { :disk_size_gb => 10 }
+
+Vagrant.configure("2") do |config|
+  CEPH_CLUSTER.each do |hostname, info|
+    ips = node_ips!(hostname)
+
+    config.vm.define hostname do |cfg|
+      cfg.vm.box = VERSION_CONFIG[:ubuntu_box]
+      cfg.vm.host_name = hostname
+      # Two NICs on every VM: public/client+monitor and cluster/OSD replication.
+      cfg.vm.network "private_network", ip: ips[:public]
+      cfg.vm.network "private_network", ip: ips[:cluster]
+
+      cfg.vm.provider "libvirt" do |lv|
+        lv.memory = info[:memory]
+        lv.cpus = info[:cpus]
+        lv.driver = "kvm"
+        lv.cpu_mode = "host-passthrough"
+        lv.machine_virtual_size = 32
+
+        if hostname.include? "worker"
+          devices = OSD_DEVICES_BY_HOST[hostname]
+          raise "#{hostname}: osd_devices 선언이 없습니다: #{INVENTORY_PATH}" if devices.nil?
+
+          devices.each do |_device|
+            lv.storage :file,
+              size: "#{CEPH_OSD[:disk_size_gb]}G",
+              type: "raw",
+              bus: "virtio",
+              cache: "none"
+          end
+        end
+      end
+
+      cfg.vm.provision "shell", path: "./scripts/ceph/common-setup.sh",
+        args: [NETWORK_CONFIG[:master_ip], NETWORK_CONFIG[:network_prefix], CEPH_WORKER_NODES],
+        env: {
+          "CEPH_PUBLIC_NETWORK" => CEPH_PUBLIC_NETWORK,
+          "CEPH_CLUSTER_NETWORK" => CEPH_CLUSTER_NETWORK
+        }
+
+      if hostname == "ceph-master"
+        cfg.vm.provision "shell", path: "./scripts/ceph/cephadm-setup.sh", name: "cephadm",
+          args: [NETWORK_CONFIG[:network_prefix], CEPH_WORKER_NODES, VERSION_CONFIG[:ceph], CEPH_SERVICES[:mon_count], CEPH_SERVICES[:mgr_count], CEPH_OSD_DEVICES.join(",")],
+          env: {
+            "CEPH_PUBLIC_NETWORK" => CEPH_PUBLIC_NETWORK,
+            "CEPH_CLUSTER_NETWORK" => CEPH_CLUSTER_NETWORK
+          },
+          privileged: true
+        cfg.vm.provision "shell", path: "./scripts/ceph/cephadm-cephfs.sh", name: "cephfs",
+          args: [NETWORK_CONFIG[:network_prefix], NETWORK_CONFIG[:master_ip], CEPH_SERVICES[:mds_count]],
+          privileged: true
+        cfg.vm.provision "shell", path: "./scripts/ceph/cephadm-rbd.sh", name: "cephrbd",
+          args: [NETWORK_CONFIG[:network_prefix], NETWORK_CONFIG[:master_ip]],
+          privileged: true
+        cfg.vm.provision "shell", path: "./scripts/ceph/monitoring-setup.sh", name: "monitoring",
+          privileged: true
+        cfg.vm.provision "shell", path: "./scripts/ceph/cephadm-object-storage.sh", name: "cephobject",
+          args: [NETWORK_CONFIG[:network_prefix], NETWORK_CONFIG[:master_ip]],
+          privileged: true
+        cfg.vm.provision "shell", path: "./scripts/ceph/fix-osd-heartbeat.sh", name: "osdheartbeat",
+          args: ["/vagrant/inventory/inventory.ini"],
+          privileged: true
+      end
+    end
+  end
+end

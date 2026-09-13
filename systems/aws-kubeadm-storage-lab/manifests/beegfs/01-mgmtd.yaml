@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: beegfs-mgmtd
+  namespace: beegfs-system
+  labels:
+    app: beegfs-mgmtd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: beegfs-mgmtd
+  template:
+    metadata:
+      labels:
+        app: beegfs-mgmtd
+    spec:
+      hostNetwork: true
+      hostPID: true
+      # nodeName 대신 라벨 셀렉터 사용 — 호스트명 하드코딩 제거
+      # 적용 전: kubectl label node <mgmtd-노드> beegfs.io/role=mgmtd
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+        beegfs.io/role: mgmtd
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: beegfs-mgmtd
+          image: ubuntu:24.04
+          command:
+            - chroot
+            - /host
+            - /opt/beegfs/sbin/beegfs-mgmtd
+            - cfgFile=/etc/beegfs/beegfs-mgmtd.conf
+            - runDaemonized=false
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: beegfs-mgmtd
+  namespace: beegfs-system
+spec:
+  selector:
+    app: beegfs-mgmtd
+  clusterIP: None
+  ports:
+    - name: mgmtd
+      port: 8008
+      protocol: TCP

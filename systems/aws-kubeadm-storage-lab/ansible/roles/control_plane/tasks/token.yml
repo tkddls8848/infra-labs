@@ -1,0 +1,31 @@
+- name: Generate worker join command
+  ansible.builtin.command: kubeadm token create --print-join-command
+  changed_when: true
+  register: join_command_output
+
+# Upload certs so master-2/3 can join as control-plane
+- name: Upload certs and capture certificate key
+  ansible.builtin.command: kubeadm init phase upload-certs --upload-certs
+  changed_when: true
+  register: upload_certs_output
+
+# Save worker join command to local file for worker nodes to read
+- name: Save worker join command to local file
+  become: false
+  local_action:
+    module: copy
+    content: "{{ join_command_output.stdout }}"
+    dest: /tmp/worker-join-command
+    mode: '0640'
+
+# Save control-plane join command to local file for master-2/3 to read
+- name: Save control-plane join command to local file
+  become: false
+  local_action:
+    module: copy
+    content: >-
+      {{ join_command_output.stdout }}
+      --control-plane
+      --certificate-key {{ upload_certs_output.stdout_lines | last }}
+    dest: /tmp/cp-join-command
+    mode: '0640'

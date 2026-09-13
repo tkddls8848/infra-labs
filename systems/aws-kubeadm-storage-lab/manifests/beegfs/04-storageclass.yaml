@@ -1,0 +1,15 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: beegfs-scratch
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "false"
+provisioner: beegfs.csi.netapp.com
+parameters:
+  # BeeGFS mgmtd 주소 — beegfs.yml 배포 시 beegfs_mgmtd_host 실제 IP로 치환됨
+  # (CSI Driver node plugin은 hostNetwork에서 실행 → 클러스터 DNS 불가, 직접 IP 필요)
+  sysMgmtdHost: beegfs-mgmtd.beegfs-system
+  # CSI 드라이버가 동적 프로비저닝 시 생성할 기본 경로
+  volDirBasePath: /k8s/dynamic
+reclaimPolicy: Delete
+volumeBindingMode: Immediate

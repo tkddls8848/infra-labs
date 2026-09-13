@@ -1,0 +1,16 @@
+---
+- name: Create manifests directory
+  ansible.builtin.file:
+    path: /home/ubuntu/manifests
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: '0755'
+
+- name: Upload manifests to master
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../manifests/"
+    dest: /home/ubuntu/manifests/
+    owner: ubuntu
+    group: ubuntu
+    mode: '0644'

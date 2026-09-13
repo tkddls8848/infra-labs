@@ -1,0 +1,4 @@
+.artifacts/
+.vagrant/
+!scripts/lib/
+!scripts/lib/**

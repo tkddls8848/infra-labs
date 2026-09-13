@@ -1,0 +1,350 @@
+---
+# ── BeeGFS 8.x 잔존 패키지 제거 (있을 경우) ────────────────────────────────
+- name: Remove BeeGFS 8.x packages if present
+  ansible.builtin.apt:
+    name:
+      - beegfs-mgmtd
+      - beegfs-meta
+      - beegfs-storage
+      - beegfs-client
+      - beegfs-helperd
+      - beegfs-utils
+      - beegfs-mon
+    state: absent
+    purge: yes
+  failed_when: false
+
+# ── GPG key + APT repo (beegfs_7.4) ─────────────────────────────────────────
+- name: Register BeeGFS GPG key
+  ansible.builtin.shell: |
+    wget -q https://www.beegfs.io/release/{{ beegfs_version }}/gpg/GPG-KEY-beegfs \
+      -O /tmp/beegfs.gpg
+    if grep -q 'BEGIN PGP' /tmp/beegfs.gpg 2>/dev/null; then
+      gpg --dearmor < /tmp/beegfs.gpg > /etc/apt/trusted.gpg.d/beegfs.gpg
+    else
+      cp /tmp/beegfs.gpg /etc/apt/trusted.gpg.d/beegfs.gpg
+    fi
+  changed_when: false
+  tags: [ami_base]
+
+- name: Add BeeGFS APT repository
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/beegfs.list
+    mode: '0644'
+    content: |
+      deb [signed-by=/etc/apt/trusted.gpg.d/beegfs.gpg] https://www.beegfs.io/release/{{ beegfs_version }}/ noble non-free
+  tags: [ami_base]
+
+- name: Update APT cache
+  ansible.builtin.apt:
+    update_cache: yes
+  tags: [ami_base]
+
+# ── Package install ──────────────────────────────────────────────────────────
+- name: Install BeeGFS packages (master)
+  ansible.builtin.apt:
+    name:
+      - beegfs-mgmtd
+      - beegfs-meta
+      - beegfs-utils
+      - beegfs-mon
+    state: present
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  when: "'master' in group_names"
+  register: apt_result
+  until: apt_result is succeeded
+  retries: 3
+  delay: 5
+  tags: [ami_base]
+
+# 커널 고정(reboot) 후 갱신된 ansible_facts['kernel'] 기준으로 헤더 설치
+- name: Install kernel headers for BeeGFS build (worker)
+  ansible.builtin.apt:
+    name: "linux-headers-{{ ansible_facts['kernel'] }}"
+    state: present
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  when: "'worker' in group_names"
+  tags: [ami_base]
+
+- name: Install BeeGFS packages (worker)
+  ansible.builtin.apt:
+    name:
+      - xfsprogs
+      - dkms
+      - beegfs-storage
+      - beegfs-client
+      - beegfs-helperd
+      - beegfs-utils
+    state: present
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  when: "'worker' in group_names"
+  register: apt_result
+  until: apt_result is succeeded
+  retries: 3
+  delay: 5
+  tags: [ami_base]
+
+# ── Master: storage directories ──────────────────────────────────────────────
+- name: Create BeeGFS mgmtd/meta data directories (master)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /mnt/beegfs/mgmtd
+    - /mnt/beegfs/meta
+  when: "'master' in group_names"
+
+# ── Master: conf files ───────────────────────────────────────────────────────
+# storeAllowFirstRunInit = true 이면 beegfs 데몬이 첫 기동 시 스토리지를 자동 초기화함
+- name: Create beegfs-mgmtd.conf (master)
+  ansible.builtin.copy:
+    dest: /etc/beegfs/beegfs-mgmtd.conf
+    force: yes
+    mode: '0644'
+    content: |
+      storeMgmtdDirectory          = /mnt/beegfs/mgmtd
+      storeAllowFirstRunInit       = true
+      connDisableAuthentication    = true
+      sysMgmtdHost                 =
+      connMgmtdPortTCP             = 8008
+      connMgmtdPortUDP             = 8008
+      connClientPortUDP            = 8004
+      connStoragePortTCP           = 8003
+      connStoragePortUDP           = 8003
+      connMetaPortTCP              = 8005
+      connMetaPortUDP              = 8005
+      logLevel                     = 2
+      logType                      = syslog
+  when: "'master' in group_names"
+
+- name: Create beegfs-meta.conf (master)
+  ansible.builtin.copy:
+    dest: /etc/beegfs/beegfs-meta.conf
+    force: yes
+    mode: '0644'
+    content: |
+      storeMetaDirectory           = /mnt/beegfs/meta
+      storeAllowFirstRunInit       = true
+      connDisableAuthentication    = true
+      sysMgmtdHost                 = {{ beegfs_mgmtd_host }}
+      connMgmtdPortTCP             = 8008
+      connMgmtdPortUDP             = 8008
+      connMetaPortTCP              = 8005
+      connMetaPortUDP              = 8005
+      logLevel                     = 2
+      logType                      = syslog
+  when: "'master' in group_names"
+
+- name: Create beegfs-mon.conf (master)
+  ansible.builtin.copy:
+    dest: /etc/beegfs/beegfs-mon.conf
+    force: yes
+    mode: '0644'
+    content: |
+      connDisableAuthentication    = true
+      sysMgmtdHost                 = {{ beegfs_mgmtd_host }}
+      connMgmtdPortTCP             = 8008
+      connMgmtdPortUDP             = 8008
+      logLevel                     = 2
+      logType                      = syslog
+  when: "'master' in group_names"
+
+# ── Worker: BeeGFS 디스크 자동 탐색 (Nitro NVMe 순서 비결정적 문제 대응) ────────
+# AWS Nitro 인스턴스에서 nvme*n1 번호는 커널 발견 순서에 따라 달라짐.
+# nvme id-ctrl로 EBS 연결 장치명(xvdd)을 찾아 beegfs_storage_device를 덮어씀.
+- name: Discover BeeGFS storage device via nvme id-ctrl (xvdd, worker)
+  ansible.builtin.shell: |
+    for dev in /dev/nvme*n1; do
+      [ "$dev" = "/dev/nvme0n1" ] && continue
+      if nvme id-ctrl "$dev" 2>/dev/null | grep -q 'xvdd'; then
+        echo "$dev"
+        exit 0
+      fi
+    done
+    # Fallback: 8GB 디스크 (BeeGFS 전용 크기)
+    lsblk -d -o NAME,SIZE --noheadings \
+      | awk '$2 == "8G" {print "/dev/" $1}' \
+      | head -1
+  register: _beegfs_dev
+  when: "'worker' in group_names"
+  changed_when: false
+
+- name: Set beegfs_storage_device from discovered device (worker)
+  ansible.builtin.set_fact:
+    beegfs_storage_device: "{{ _beegfs_dev.stdout | trim }}"
+  when:
+    - "'worker' in group_names"
+    - _beegfs_dev.stdout | trim | length > 0
+
+- name: Fail if BeeGFS storage device not found (worker)
+  ansible.builtin.fail:
+    msg: >-
+      BeeGFS 스토리지 디스크를 찾을 수 없습니다.
+      nvme id-ctrl로 xvdd를 찾지 못했고 8GB 디스크도 없습니다.
+      lsblk 출력: {{ _beegfs_dev.stderr | default('') }}
+  when:
+    - "'worker' in group_names"
+    - _beegfs_dev.stdout | trim | length == 0
+
+# ── Worker: XFS disk format + mount ─────────────────────────────────────────
+- name: Format BeeGFS storage disk as XFS (worker)
+  community.general.filesystem:
+    fstype: xfs
+    dev: "{{ beegfs_storage_device }}"
+  when: "'worker' in group_names"
+
+- name: Create BeeGFS storage mount point (worker)
+  ansible.builtin.file:
+    path: /mnt/beegfs/storage
+    state: directory
+    mode: '0755'
+  when: "'worker' in group_names"
+
+- name: Mount BeeGFS storage disk (worker)
+  ansible.posix.mount:
+    path: /mnt/beegfs/storage
+    src: "{{ beegfs_storage_device }}"
+    fstype: xfs
+    opts: defaults,noatime
+    state: mounted
+  when: "'worker' in group_names"
+
+# ── Worker: conf files ───────────────────────────────────────────────────────
+- name: Create beegfs-storage.conf (worker)
+  ansible.builtin.copy:
+    dest: /etc/beegfs/beegfs-storage.conf
+    force: yes
+    mode: '0644'
+    content: |
+      storeStorageDirectory        = /mnt/beegfs/storage
+      storeAllowFirstRunInit       = true
+      connDisableAuthentication    = true
+      sysMgmtdHost                 = {{ beegfs_mgmtd_host }}
+      connMgmtdPortTCP             = 8008
+      connMgmtdPortUDP             = 8008
+      connStoragePortTCP           = 8003
+      connStoragePortUDP           = 8003
+      logLevel                     = 2
+      logType                      = syslog
+  when: "'worker' in group_names"
+
+- name: Create beegfs-client.conf (worker)
+  ansible.builtin.copy:
+    dest: /etc/beegfs/beegfs-client.conf
+    force: yes
+    mode: '0644'
+    content: |
+      connDisableAuthentication    = true
+      sysMgmtdHost                 = {{ beegfs_mgmtd_host }}
+      connMgmtdPortTCP             = 8008
+      connMgmtdPortUDP             = 8008
+      connClientPortUDP            = 8004
+      logLevel                     = 2
+      logType                      = syslog
+  when: "'worker' in group_names"
+
+- name: Create beegfs-helperd.conf (worker)
+  ansible.builtin.copy:
+    dest: /etc/beegfs/beegfs-helperd.conf
+    force: yes
+    mode: '0644'
+    content: |
+      connDisableAuthentication    = true
+      logLevel                     = 2
+      logType                      = syslog
+  when: "'worker' in group_names"
+
+# ── Worker: BeeGFS 커널 모듈 빌드 및 로드 ───────────────────────────────────
+# conf 생성 완료 후 실행 — 실패해도 이미 conf는 생성됨
+# BeeGFS 7.x는 DKMS가 아닌 자체 빌드 시스템 사용 (/opt/beegfs/src/client/client_module_7/)
+- name: Build BeeGFS kernel module (worker)
+  ansible.builtin.shell: |
+    BUILD=/opt/beegfs/src/client/client_module_7/build
+    [ -d "$BUILD" ] || { echo "ERROR: BeeGFS source not found at $BUILD"; exit 1; }
+    make -C "$BUILD" 2>&1
+    install -D -m644 "$BUILD/beegfs.ko" \
+      /lib/modules/$(uname -r)/extra/beegfs/beegfs.ko
+    depmod -a
+  when: "'worker' in group_names"
+  register: beegfs_build_result
+  changed_when: true
+
+- name: Load BeeGFS kernel module (worker)
+  community.general.modprobe:
+    name: beegfs
+    state: present
+  when: "'worker' in group_names"
+  failed_when: false
+  register: modprobe_result
+
+- name: Warn if BeeGFS kernel module could not be loaded (worker)
+  ansible.builtin.debug:
+    msg: "WARNING: beegfs 커널 모듈 로드 실패 — CSI Driver가 동작하지 않을 수 있습니다. 'dkms status' 로 확인하세요."
+  when:
+    - "'worker' in group_names"
+    - modprobe_result is failed
+
+- name: Persist BeeGFS kernel module across reboots (worker)
+  ansible.builtin.lineinfile:
+    path: /etc/modules-load.d/beegfs.conf
+    line: beegfs
+    create: yes
+    mode: '0644'
+  when: "'worker' in group_names"
+
+# ── Disable systemd services (K8s DaemonSet/Deployment으로 관리) ─────────────
+- name: Disable beegfs-mgmtd systemd service (master)
+  ansible.builtin.systemd:
+    name: beegfs-mgmtd
+    state: stopped
+    enabled: no
+  when: "'master' in group_names"
+  failed_when: false
+
+- name: Disable beegfs-meta systemd service (master)
+  ansible.builtin.systemd:
+    name: beegfs-meta
+    state: stopped
+    enabled: no
+  when: "'master' in group_names"
+  failed_when: false
+
+- name: Disable beegfs-mon systemd service (master)
+  ansible.builtin.systemd:
+    name: beegfs-mon
+    state: stopped
+    enabled: no
+  when: "'master' in group_names"
+  failed_when: false
+
+- name: Disable beegfs-storage systemd service (worker)
+  ansible.builtin.systemd:
+    name: beegfs-storage
+    state: stopped
+    enabled: no
+  when: "'worker' in group_names"
+  failed_when: false
+
+- name: Enable and start beegfs-helperd (worker)
+  ansible.builtin.systemd:
+    name: beegfs-helperd
+    state: started
+    enabled: yes
+  when: "'worker' in group_names"
+  failed_when: false
+
+# ── mgmtd 노드 라벨링 (01-mgmtd.yaml의 nodeSelector 대응) ───────────────────
+- name: Label mgmtd node (beegfs.io/role=mgmtd)
+  ansible.builtin.command: >
+    kubectl label node
+    {{ hostvars[groups['master'][0]]['ec2_tags']['Name'] | regex_replace(project_name + '-', '') }}
+    beegfs.io/role=mgmtd --overwrite
+  delegate_to: "{{ groups['master'][0] }}"
+  run_once: true
+  become: false
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config

@@ -1,0 +1,16 @@
+# Derive node name from ec2 tag
+- name: Determine master node name from EC2 tag
+  ansible.builtin.set_fact:
+    master_node_name: >-
+      {{ hostvars[inventory_hostname]['ec2_tags']['Name']
+         | regex_replace(project_name + '-', '') }}
+
+- name: Set master hostname
+  hostname:
+    name: "{{ master_node_name }}"
+
+- import_tasks: init.yml
+- import_tasks: kubeconfig.yml
+- import_tasks: manifests.yml
+- import_tasks: verify.yml
+- import_tasks: token.yml

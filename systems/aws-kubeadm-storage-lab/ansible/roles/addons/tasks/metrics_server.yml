@@ -1,0 +1,40 @@
+---
+- name: Metrics Server 설치 여부 확인
+  ansible.builtin.command: kubectl get deployment metrics-server -n kube-system
+  register: metrics_check
+  failed_when: false
+  changed_when: false
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+
+- name: Metrics Server 설치
+  ansible.builtin.shell: |
+    kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+  when: metrics_check.rc != 0
+  changed_when: true
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+
+- name: Metrics Server --kubelet-insecure-tls 패치 여부 확인
+  ansible.builtin.shell: |
+    kubectl get deployment metrics-server -n kube-system \
+      -o jsonpath='{.spec.template.spec.containers[0].args}' \
+      | grep -c insecure-tls || true
+  register: tls_check
+  changed_when: false
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+
+- name: Metrics Server --kubelet-insecure-tls 패치
+  ansible.builtin.shell: |
+    kubectl patch deployment metrics-server -n kube-system --type='json' \
+      -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+  when: tls_check.stdout | int == 0
+  changed_when: true
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+
+- name: Metrics Server rollout 대기
+  ansible.builtin.command: kubectl rollout status deployment/metrics-server -n kube-system --timeout=120s
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config

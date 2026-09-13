@@ -1,0 +1,153 @@
+---
+- name: BeeGFS SSH 연결 대기
+  hosts: master:worker
+  gather_facts: false
+  tasks:
+    - name: SSH 연결 대기 (최대 5분)
+      wait_for_connection:
+        timeout: 300
+        sleep: 5
+
+- name: BeeGFS 패키지 설치 및 디스크 준비
+  hosts: master:worker
+  become: yes
+  roles:
+    - beegfs_prep
+
+- name: BeeGFS K8s 매니페스트 적용
+  hosts: master
+  become: no
+  tasks:
+    - name: BeeGFS 매니페스트 디렉토리 생성
+      ansible.builtin.file:
+        path: /home/ubuntu/manifests/beegfs
+        state: directory
+        mode: '0755'
+
+    - name: BeeGFS 매니페스트 파일 복사 (bastion → master)
+      ansible.builtin.copy:
+        src: /home/ubuntu/manifests/beegfs/
+        dest: /home/ubuntu/manifests/beegfs/
+        mode: '0644'
+
+    # CSI Driver가 hostNetwork mgmtd에 직접 접속하므로 실제 IP로 치환
+    - name: StorageClass sysMgmtdHost 실제 IP로 치환
+      ansible.builtin.replace:
+        path: /home/ubuntu/manifests/beegfs/04-storageclass.yaml
+        regexp: 'sysMgmtdHost: beegfs-mgmtd\.beegfs-system'
+        replace: "sysMgmtdHost: {{ hostvars[groups['master'][0]].ansible_host }}"
+      run_once: true
+
+    # parameters 변경 시 StorageClass는 apply 불가 → 삭제 후 재생성
+    - name: StorageClass 재생성을 위해 기존 삭제
+      ansible.builtin.command: kubectl delete storageclass beegfs-scratch --ignore-not-found
+      environment:
+        KUBECONFIG: "/home/ubuntu/.kube/config"
+      run_once: true
+      changed_when: true
+
+    - name: BeeGFS 네임스페이스 및 데몬 매니페스트 적용
+      ansible.builtin.command: kubectl apply -f /home/ubuntu/manifests/beegfs/
+      environment:
+        KUBECONFIG: "/home/ubuntu/.kube/config"
+      run_once: true
+      changed_when: true
+
+    - name: BeeGFS mgmtd 준비 완료 대기
+      ansible.builtin.command: kubectl rollout status deployment/beegfs-mgmtd -n beegfs-system --timeout=120s
+      environment:
+        KUBECONFIG: "/home/ubuntu/.kube/config"
+      register: rollout_result
+      until: rollout_result.rc == 0
+      retries: 3
+      delay: 10
+      run_once: true
+      changed_when: true
+
+    - name: BeeGFS meta 준비 완료 대기
+      ansible.builtin.command: kubectl rollout status deployment/beegfs-meta -n beegfs-system --timeout=120s
+      environment:
+        KUBECONFIG: "/home/ubuntu/.kube/config"
+      register: rollout_result
+      until: rollout_result.rc == 0
+      retries: 3
+      delay: 10
+      run_once: true
+      changed_when: true
+
+    - name: BeeGFS storaged DaemonSet 준비 완료 대기
+      ansible.builtin.command: kubectl rollout status daemonset/beegfs-storage -n beegfs-system --timeout=180s
+      environment:
+        KUBECONFIG: "/home/ubuntu/.kube/config"
+      register: rollout_result
+      until: rollout_result.rc == 0
+      retries: 3
+      delay: 10
+      run_once: true
+      changed_when: true
+
+    - name: BeeGFS Prometheus Exporter 준비 완료 대기
+      ansible.builtin.command: kubectl rollout status deployment/beegfs-exporter -n beegfs-system --timeout=120s
+      environment:
+        KUBECONFIG: "/home/ubuntu/.kube/config"
+      register: rollout_result
+      until: rollout_result.rc == 0
+      retries: 3
+      delay: 10
+      run_once: true
+      changed_when: true
+
+- name: BeeGFS CSI Driver 설치
+  hosts: master
+  become: no
+  tasks:
+    - name: beegfs-csi-driver 소스 clone
+      git:
+        repo: https://github.com/ThinkParQ/beegfs-csi-driver.git
+        dest: /tmp/beegfs-csi-driver
+        depth: 1
+        force: yes
+      run_once: true
+
+    - name: CSI Driver csi-beegfs-config.yaml 설정
+      ansible.builtin.copy:
+        dest: /tmp/beegfs-csi-driver/deploy/k8s/overlays/default/csi-beegfs-config.yaml
+        content: |
+          config:
+            beegfsClientConf:
+              connDisableAuthentication: "true"
+          fileSystemSpecificConfigs:
+            - sysMgmtdHost: {{ hostvars[groups['master'][0]].ansible_host }}
+              config:
+                beegfsClientConf:
+                  connDisableAuthentication: "true"
+      run_once: true
+
+    - name: BeeGFS CSI Driver kustomize 배포
+      ansible.builtin.command: kubectl apply -k /tmp/beegfs-csi-driver/deploy/k8s/overlays/default
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      run_once: true
+      changed_when: true
+
+    - name: BeeGFS CSI Controller 준비 완료 대기
+      ansible.builtin.command: kubectl rollout status statefulset/csi-beegfs-controller -n beegfs-csi --timeout=180s
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: csi_result
+      until: csi_result.rc == 0
+      retries: 3
+      delay: 10
+      run_once: true
+      changed_when: true
+
+    - name: BeeGFS CSI Node DaemonSet 준비 완료 대기
+      ansible.builtin.command: kubectl rollout status daemonset/csi-beegfs-node -n beegfs-csi --timeout=180s
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      register: csi_node_result
+      until: csi_node_result.rc == 0
+      retries: 3
+      delay: 10
+      run_once: true
+      changed_when: true

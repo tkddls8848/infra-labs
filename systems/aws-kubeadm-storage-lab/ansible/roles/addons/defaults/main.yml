@@ -1,0 +1,14 @@
+---
+addon_metrics_server: true
+addon_dashboard: true
+addon_prometheus_grafana: true
+addon_metallb: true
+
+dashboard_nodeport: 30443
+prometheus_nodeport: 30090
+grafana_nodeport: 30300
+alertmanager_nodeport: 30093
+grafana_admin_password: "admin12345"
+
+# MetalLB: k8s 서브넷(10.0.1.0/24) 끝단 예약 대역
+metallb_ip_range: "10.0.1.200-10.0.1.220"

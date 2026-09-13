@@ -1,0 +1,83 @@
+---
+- name: metallb-system 네임스페이스 확인
+  ansible.builtin.command: kubectl get namespace metallb-system
+  register: metallb_ns_check
+  failed_when: false
+  changed_when: false
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+
+- name: MetalLB native manifest 설치
+  ansible.builtin.shell: |
+    kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.9/config/manifests/metallb-native.yaml
+  when: metallb_ns_check.rc != 0
+  changed_when: true
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+
+- name: MetalLB controller rollout 대기
+  ansible.builtin.command: >
+    kubectl rollout status deployment/controller
+    -n metallb-system --timeout=120s
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+
+- name: MetalLB speaker daemonset 대기
+  ansible.builtin.command: >
+    kubectl rollout status daemonset/speaker
+    -n metallb-system --timeout=120s
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+
+- name: EC2 Source/Destination Check 비활성화 (L2 모드 필수)
+  ansible.builtin.shell: |
+    INSTANCE_IDS=$(aws ec2 describe-instances \
+      --filters "Name=tag:Name,Values={{ project_name }}-master-*,{{ project_name }}-worker-*" \
+      --query "Reservations[].Instances[].InstanceId" \
+      --output text \
+      --region {{ aws_region }})
+    for id in $INSTANCE_IDS; do
+      aws ec2 modify-instance-attribute --instance-id "$id" --no-source-dest-check --region {{ aws_region }}
+    done
+  delegate_to: localhost
+  become: false
+  changed_when: true
+
+- name: MetalLB IPAddressPool 설정
+  ansible.builtin.shell: |
+    kubectl apply -f - <<'EOF'
+    apiVersion: metallb.io/v1beta1
+    kind: IPAddressPool
+    metadata:
+      name: k8s-pool
+      namespace: metallb-system
+    spec:
+      addresses:
+        - {{ metallb_ip_range }}
+    EOF
+  changed_when: true
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+
+- name: MetalLB L2Advertisement 설정
+  ansible.builtin.shell: |
+    kubectl apply -f - <<'EOF'
+    apiVersion: metallb.io/v1beta1
+    kind: L2Advertisement
+    metadata:
+      name: k8s-l2adv
+      namespace: metallb-system
+    spec:
+      ipAddressPools:
+        - k8s-pool
+    EOF
+  changed_when: true
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+
+- name: MetalLB 설정 완료 출력
+  ansible.builtin.debug:
+    msg:
+      - "MetalLB L2 모드 설치 완료"
+      - "LB IP 풀 : {{ metallb_ip_range }}"
+      - "LoadBalancer 타입 Service 생성 시 위 범위에서 EXTERNAL-IP 자동 할당"

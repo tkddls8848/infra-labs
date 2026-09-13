@@ -1,0 +1,22 @@
+# 전 마스터 노드에 각각 SSH 키 생성 (HA: master-2/3도 다른 노드에 SSH 접근 가능해야 함)
+- name: master SSH 키 생성 (전 마스터)
+  community.crypto.openssh_keypair:
+    path: /home/ubuntu/.ssh/id_rsa
+    owner: ubuntu
+  when: "'master' in group_names"
+
+# 각 마스터의 공개키 수집
+- name: master 공개키 수집 (전 마스터)
+  ansible.builtin.slurp:
+    src: /home/ubuntu/.ssh/id_rsa.pub
+  when: "'master' in group_names"
+  register: node_pubkey
+
+# 전 마스터의 공개키를 전 노드(master+worker)에 배포
+- name: 전 노드에 전 마스터 공개키 배포
+  ansible.posix.authorized_key:
+    user: ubuntu
+    key: "{{ hostvars[item]['node_pubkey']['content'] | b64decode }}"
+    state: present
+  loop: "{{ groups['master'] }}"
+  when: hostvars[item]['node_pubkey'] is defined

@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Storage Test App</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }
+
+    header {
+      background: #1e293b;
+      border-bottom: 1px solid #334155;
+      padding: 1rem 2rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    header h1 { font-size: 1.25rem; font-weight: 700; color: #f8fafc; }
+    header .subtitle { font-size: 0.8rem; color: #64748b; }
+
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 6px #22c55e; }
+    .status-dot.error { background: #ef4444; box-shadow: 0 0 6px #ef4444; }
+
+    .layout { display: grid; grid-template-columns: 220px 1fr; gap: 0; height: calc(100vh - 57px); }
+
+    /* Sidebar */
+    .sidebar {
+      background: #1e293b;
+      border-right: 1px solid #334155;
+      padding: 1.5rem 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .sidebar-title { font-size: 0.7rem; font-weight: 600; color: #475569; text-transform: uppercase; letter-spacing: .08em; padding: 0 0.5rem; margin-bottom: 0.25rem; }
+
+    .storage-btn {
+      display: flex; align-items: center; gap: 0.75rem;
+      padding: 0.65rem 0.75rem;
+      border-radius: 0.5rem;
+      border: 1px solid transparent;
+      cursor: pointer;
+      background: transparent;
+      color: #94a3b8;
+      font-size: 0.875rem;
+      transition: all .15s;
+      text-align: left;
+      width: 100%;
+    }
+    .storage-btn:hover { background: #273549; color: #e2e8f0; }
+    .storage-btn.active { background: #1d3a5f; border-color: #3b82f6; color: #93c5fd; }
+    .storage-btn .icon { font-size: 1.1rem; width: 22px; text-align: center; }
+    .storage-btn .info { display: flex; flex-direction: column; }
+    .storage-btn .label { font-weight: 600; }
+    .storage-btn .type { font-size: 0.7rem; color: #64748b; }
+    .storage-btn.active .type { color: #60a5fa; }
+
+    .mount-badge {
+      margin-left: auto;
+      font-size: 0.6rem;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-weight: 700;
+    }
+    .mount-badge.ok { background: #14532d; color: #4ade80; }
+    .mount-badge.fail { background: #450a0a; color: #f87171; }
+
+    /* Main */
+    .main { display: flex; flex-direction: column; overflow: hidden; }
+
+    .toolbar {
+      background: #1e293b;
+      border-bottom: 1px solid #334155;
+      padding: 0.75rem 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .toolbar h2 { font-size: 1rem; font-weight: 600; flex: 1; }
+    .toolbar .storage-tag {
+      font-size: 0.7rem;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: #1d3a5f;
+      color: #93c5fd;
+      border: 1px solid #3b82f6;
+    }
+
+    .btn {
+      padding: 0.4rem 0.9rem;
+      border-radius: 0.4rem;
+      border: none;
+      cursor: pointer;
+      font-size: 0.8rem;
+      font-weight: 600;
+      transition: all .15s;
+      display: inline-flex; align-items: center; gap: 0.4rem;
+    }
+    .btn-primary { background: #3b82f6; color: #fff; }
+    .btn-primary:hover { background: #2563eb; }
+    .btn-danger  { background: #ef4444; color: #fff; }
+    .btn-danger:hover  { background: #dc2626; }
+    .btn-success { background: #22c55e; color: #fff; }
+    .btn-success:hover { background: #16a34a; }
+    .btn-ghost   { background: #334155; color: #cbd5e1; }
+    .btn-ghost:hover   { background: #475569; }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+
+    .content { flex: 1; overflow: auto; padding: 1.5rem; display: grid; grid-template-rows: auto 1fr; gap: 1rem; }
+
+    /* File list */
+    .file-list-wrapper { overflow: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    thead tr { background: #1e293b; }
+    th { padding: 0.6rem 0.75rem; text-align: left; font-size: 0.75rem; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; border-bottom: 1px solid #334155; }
+    td { padding: 0.55rem 0.75rem; border-bottom: 1px solid #1e293b; color: #cbd5e1; vertical-align: middle; }
+    tr:hover td { background: #1e2d40; }
+    .file-row { cursor: pointer; }
+    .file-row.selected td { background: #1d3a5f; }
+    .file-name { color: #93c5fd; font-weight: 500; font-family: monospace; }
+    .file-size { color: #64748b; font-size: 0.78rem; }
+    .file-time { color: #64748b; font-size: 0.78rem; }
+    .actions { display: flex; gap: 0.4rem; }
+
+    .empty-state {
+      text-align: center; padding: 3rem; color: #475569;
+      display: flex; flex-direction: column; align-items: center; gap: 0.75rem;
+    }
+    .empty-state .emoji { font-size: 2.5rem; }
+    .empty-state p { font-size: 0.875rem; }
+
+    /* Editor panel */
+    .editor-panel {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 0.75rem;
+      padding: 1.25rem;
+      display: none;
+    }
+    .editor-panel.open { display: block; }
+    .editor-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem; }
+    .editor-header h3 { font-size: 0.9rem; font-weight: 600; flex: 1; }
+    .editor-form { display: flex; flex-direction: column; gap: 0.75rem; }
+    .field label { display: block; font-size: 0.75rem; font-weight: 600; color: #94a3b8; margin-bottom: 0.3rem; }
+    input[type="text"], textarea {
+      width: 100%;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 0.4rem;
+      color: #e2e8f0;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.875rem;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      outline: none;
+      transition: border-color .15s;
+    }
+    input[type="text"]:focus, textarea:focus { border-color: #3b82f6; }
+    textarea { resize: vertical; min-height: 140px; }
+    .editor-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
+
+    /* Toast */
+    #toast {
+      position: fixed; bottom: 1.5rem; right: 1.5rem;
+      background: #1e293b; border: 1px solid #334155;
+      border-radius: 0.5rem; padding: 0.75rem 1.25rem;
+      font-size: 0.85rem; max-width: 300px;
+      transform: translateY(80px); opacity: 0;
+      transition: all .25s; z-index: 999;
+    }
+    #toast.show { transform: translateY(0); opacity: 1; }
+    #toast.success { border-color: #22c55e; color: #4ade80; }
+    #toast.error   { border-color: #ef4444; color: #f87171; }
+
+    /* Health bar */
+    .health-bar {
+      padding: 0.4rem 1.5rem;
+      background: #0f172a;
+      border-bottom: 1px solid #1e293b;
+      font-size: 0.72rem;
+      color: #475569;
+      display: flex; gap: 1.5rem; align-items: center;
+    }
+    .health-item { display: flex; align-items: center; gap: 0.4rem; }
+    .health-item .dot { width: 6px; height: 6px; border-radius: 50%; }
+    .health-item .dot.ok { background: #22c55e; }
+    .health-item .dot.fail { background: #ef4444; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="status-dot" id="globalDot"></div>
+  <h1>Storage Test App</h1>
+  <span class="subtitle">Ceph / BeeGFS CRUD 테스트</span>
+</header>
+
+<div id="healthBar" class="health-bar"></div>
+
+<div class="layout">
+  <nav class="sidebar">
+    <div class="sidebar-title">스토리지 선택</div>
+    <button class="storage-btn active" data-storage="cephfs" onclick="selectStorage('cephfs')">
+      <span class="icon">🗂️</span>
+      <span class="info">
+        <span class="label">CephFS</span>
+        <span class="type">Ceph File · RWX</span>
+      </span>
+      <span class="mount-badge" id="badge-cephfs">?</span>
+    </button>
+    <button class="storage-btn" data-storage="rbd" onclick="selectStorage('rbd')">
+      <span class="icon">💾</span>
+      <span class="info">
+        <span class="label">Ceph RBD</span>
+        <span class="type">Ceph Block · RWO</span>
+      </span>
+      <span class="mount-badge" id="badge-rbd">?</span>
+    </button>
+    <button class="storage-btn" data-storage="beegfs" onclick="selectStorage('beegfs')">
+      <span class="icon">⚡</span>
+      <span class="info">
+        <span class="label">BeeGFS</span>
+        <span class="type">Parallel FS · RWX</span>
+      </span>
+      <span class="mount-badge" id="badge-beegfs">?</span>
+    </button>
+  </nav>
+
+  <div class="main">
+    <div class="toolbar">
+      <h2 id="currentLabel">CephFS</h2>
+      <span class="storage-tag" id="currentTag">cephfs</span>
+      <button class="btn btn-ghost" onclick="loadFiles()">↺ 새로고침</button>
+      <button class="btn btn-primary" onclick="openCreate()">+ 파일 생성</button>
+    </div>
+
+    <div class="content">
+      <div class="editor-panel" id="editorPanel">
+        <div class="editor-header">
+          <h3 id="editorTitle">파일 생성</h3>
+          <button class="btn btn-ghost" onclick="closeEditor()">✕ 닫기</button>
+        </div>
+        <div class="editor-form">
+          <div class="field" id="nameField">
+            <label>파일명</label>
+            <input type="text" id="fileName" placeholder="example.txt" />
+          </div>
+          <div class="field">
+            <label>내용</label>
+            <textarea id="fileContent" placeholder="파일 내용을 입력하세요..."></textarea>
+          </div>
+          <div class="editor-actions">
+            <button class="btn btn-ghost" onclick="closeEditor()">취소</button>
+            <button class="btn btn-success" id="saveBtn" onclick="saveFile()">저장</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="file-list-wrapper">
+        <div id="fileList"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+  let currentStorage = 'cephfs';
+  let editingFile = null;
+  let healthData = {};
+
+  const STORAGE_LABELS = {
+    cephfs: 'Ceph File (CephFS)',
+    rbd:    'Ceph Block (RBD)',
+    beegfs: 'BeeGFS',
+  };
+
+  async function api(method, path, body) {
+    const opts = { method, headers: { 'Content-Type': 'application/json' } };
+    if (body) opts.body = JSON.stringify(body);
+    const res = await fetch('/api' + path, opts);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    return data;
+  }
+
+  // ── Health check ──────────────────────────────────────────────────────────
+  async function checkHealth() {
+    try {
+      const data = await api('GET', '/health');
+      healthData = data.storages;
+      const bar = document.getElementById('healthBar');
+      bar.innerHTML = Object.entries(data.storages).map(([k, v]) =>
+        `<span class="health-item">
+          <span class="dot ${v.mounted ? 'ok' : 'fail'}"></span>
+          ${v.label}: <strong style="color:${v.mounted ? '#4ade80' : '#f87171'}">${v.mounted ? '마운트됨' : '미마운트'}</strong>
+          <span style="color:#334155">(${v.path})</span>
+        </span>`
+      ).join('');
+
+      const allOk = Object.values(data.storages).every(v => v.mounted);
+      const dot = document.getElementById('globalDot');
+      dot.className = 'status-dot' + (allOk ? '' : ' error');
+
+      ['cephfs','rbd','beegfs'].forEach(k => {
+        const badge = document.getElementById('badge-' + k);
+        const ok = data.storages[k]?.mounted;
+        badge.textContent = ok ? 'OK' : 'N/A';
+        badge.className = 'mount-badge ' + (ok ? 'ok' : 'fail');
+      });
+    } catch(e) {
+      document.getElementById('globalDot').className = 'status-dot error';
+    }
+  }
+
+  // ── Storage selection ─────────────────────────────────────────────────────
+  function selectStorage(storage) {
+    currentStorage = storage;
+    document.querySelectorAll('.storage-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.storage === storage);
+    });
+    document.getElementById('currentLabel').textContent = STORAGE_LABELS[storage];
+    document.getElementById('currentTag').textContent = storage;
+    closeEditor();
+    loadFiles();
+  }
+
+  // ── File list ─────────────────────────────────────────────────────────────
+  async function loadFiles() {
+    const container = document.getElementById('fileList');
+    container.innerHTML = '<div style="padding:2rem;color:#475569;font-size:.85rem;">불러오는 중...</div>';
+    try {
+      const data = await api('GET', `/${currentStorage}/files`);
+      if (data.files.length === 0) {
+        container.innerHTML = `
+          <div class="empty-state">
+            <span class="emoji">📂</span>
+            <p>파일이 없습니다</p>
+            <p style="font-size:.78rem">[파일 생성] 버튼으로 첫 파일을 만들어보세요</p>
+          </div>`;
+        return;
+      }
+      container.innerHTML = `
+        <table>
+          <thead><tr>
+            <th>파일명</th><th>크기</th><th>수정일</th><th>작업</th>
+          </tr></thead>
+          <tbody>
+            ${data.files.map(f => `
+              <tr class="file-row" onclick="openRead('${esc(f.name)}')">
+                <td class="file-name">📄 ${esc(f.name)}</td>
+                <td class="file-size">${fmtSize(f.size)}</td>
+                <td class="file-time">${f.modified}</td>
+                <td class="actions" onclick="event.stopPropagation()">
+                  <button class="btn btn-ghost" style="padding:.25rem .6rem;font-size:.75rem" onclick="openEdit('${esc(f.name)}')">✏️ 수정</button>
+                  <button class="btn btn-danger" style="padding:.25rem .6rem;font-size:.75rem" onclick="deleteFile('${esc(f.name)}')">🗑️ 삭제</button>
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>`;
+    } catch(e) {
+      container.innerHTML = `<div class="empty-state"><span class="emoji">⚠️</span><p style="color:#f87171">${esc(e.message)}</p></div>`;
+    }
+  }
+
+  // ── Editor ────────────────────────────────────────────────────────────────
+  function openCreate() {
+    editingFile = null;
+    document.getElementById('editorTitle').textContent = '파일 생성';
+    document.getElementById('nameField').style.display = 'block';
+    document.getElementById('fileName').value = '';
+    document.getElementById('fileContent').value = '';
+    document.getElementById('saveBtn').textContent = '생성';
+    document.getElementById('editorPanel').classList.add('open');
+    document.getElementById('fileName').focus();
+  }
+
+  async function openEdit(name) {
+    try {
+      const data = await api('GET', `/${currentStorage}/files/${encodeURIComponent(name)}`);
+      editingFile = name;
+      document.getElementById('editorTitle').textContent = `수정: ${name}`;
+      document.getElementById('nameField').style.display = 'none';
+      document.getElementById('fileContent').value = data.content;
+      document.getElementById('saveBtn').textContent = '저장';
+      document.getElementById('editorPanel').classList.add('open');
+      document.getElementById('fileContent').focus();
+    } catch(e) { toast(e.message, 'error'); }
+  }
+
+  async function openRead(name) {
+    try {
+      const data = await api('GET', `/${currentStorage}/files/${encodeURIComponent(name)}`);
+      editingFile = name;
+      document.getElementById('editorTitle').textContent = `📄 ${name}`;
+      document.getElementById('nameField').style.display = 'none';
+      document.getElementById('fileContent').value = data.content;
+      document.getElementById('saveBtn').textContent = '저장';
+      document.getElementById('editorPanel').classList.add('open');
+    } catch(e) { toast(e.message, 'error'); }
+  }
+
+  function closeEditor() {
+    editingFile = null;
+    document.getElementById('editorPanel').classList.remove('open');
+  }
+
+  async function saveFile() {
+    const content = document.getElementById('fileContent').value;
+    try {
+      if (editingFile) {
+        await api('PUT', `/${currentStorage}/files/${encodeURIComponent(editingFile)}`, { content });
+        toast(`'${editingFile}' 수정 완료`, 'success');
+      } else {
+        const name = document.getElementById('fileName').value.trim();
+        if (!name) { toast('파일명을 입력하세요', 'error'); return; }
+        await api('POST', `/${currentStorage}/files`, { name, content });
+        toast(`'${name}' 생성 완료`, 'success');
+        closeEditor();
+      }
+      loadFiles();
+    } catch(e) { toast(e.message, 'error'); }
+  }
+
+  async function deleteFile(name) {
+    if (!confirm(`'${name}' 파일을 삭제하시겠습니까?`)) return;
+    try {
+      await api('DELETE', `/${currentStorage}/files/${encodeURIComponent(name)}`);
+      toast(`'${name}' 삭제 완료`, 'success');
+      loadFiles();
+    } catch(e) { toast(e.message, 'error'); }
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+  function fmtSize(b) {
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+    return (b/1048576).toFixed(1) + ' MB';
+  }
+
+  let toastTimer;
+  function toast(msg, type = 'success') {
+    const el = document.getElementById('toast');
+    el.textContent = (type === 'success' ? '✅ ' : '❌ ') + msg;
+    el.className = 'show ' + type;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.className = '', 3000);
+  }
+
+  // ── Init ──────────────────────────────────────────────────────────────────
+  checkHealth();
+  loadFiles();
+</script>
+</body>
+</html>

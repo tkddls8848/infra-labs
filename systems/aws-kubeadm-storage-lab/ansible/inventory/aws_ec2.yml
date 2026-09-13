@@ -1,0 +1,19 @@
+plugin: amazon.aws.aws_ec2
+regions:
+  - ap-northeast-2
+filters:
+  tag:Name:
+    - k8s-storage-lab-master-*
+    - k8s-storage-lab-worker-*
+  instance-state-name:
+    - running
+hostnames:
+  - private-ip-address
+# Legacy 'tags' 변수 생성 비활성화 (Ansible 예약어와 충돌 방지)
+use_contrib_script_compatible_ec2_tag_keys: false
+keyed_groups:
+  - key: ec2_tags.Role
+    prefix: ""
+    separator: ""
+compose:
+  ansible_host: private_ip_address

@@ -1,0 +1,7 @@
+- import_tasks: swap.yml
+- import_tasks: packages.yml
+  tags: [ami_base]
+- import_tasks: kernel_modules.yml
+- import_tasks: sysctl.yml
+- import_tasks: containerd.yml
+  tags: [ami_base]

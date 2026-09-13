@@ -1,0 +1,39 @@
+- name: Check if node is already joined
+  stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: kubelet_conf
+
+# New join  -> derive node name from ec2_tags
+# Already joined -> use current registered hostname (ip-10-0-1-xxx or worker-N)
+- name: Determine K8s node name
+  ansible.builtin.set_fact:
+    worker_node_name: >-
+      {{ hostvars[inventory_hostname]['ec2_tags']['Name'] | regex_replace('k8s-storage-lab-', '')
+         if not kubelet_conf.stat.exists
+         else ansible_facts['hostname'] }}
+
+- name: Set worker hostname
+  hostname:
+    name: "{{ worker_node_name }}"
+  when: not kubelet_conf.stat.exists
+
+- name: Read worker join command from local file
+  become: false
+  ansible.builtin.set_fact:
+    worker_join_command: "{{ lookup('file', '/tmp/worker-join-command') }}"
+  when: not kubelet_conf.stat.exists
+
+- name: Join worker node to cluster
+  ansible.builtin.command: >
+    {{ worker_join_command }}
+    --node-name {{ worker_node_name }}
+  when: not kubelet_conf.stat.exists
+  changed_when: true
+
+- name: Label node as worker role
+  ansible.builtin.command: kubectl label node {{ worker_node_name }} role=worker --overwrite
+  changed_when: true
+  delegate_to: "{{ groups['master'][0] }}"
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+  ignore_errors: yes

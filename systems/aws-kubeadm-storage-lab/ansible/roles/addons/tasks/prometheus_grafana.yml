@@ -1,0 +1,51 @@
+---
+- name: prometheus-community Helm repo 추가
+  ansible.builtin.command: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+  register: repo_add
+  changed_when: "'already exists' not in repo_add.stderr"
+  failed_when: repo_add.rc != 0 and 'already exists' not in repo_add.stderr
+
+- name: Helm repo 업데이트
+  ansible.builtin.command: helm repo update
+  changed_when: true
+
+- name: kube-prometheus-stack 설치 여부 확인
+  ansible.builtin.command: helm status kube-prometheus-stack -n monitoring
+  register: prom_check
+  failed_when: false
+  changed_when: false
+
+- name: kube-prometheus-stack 설치 (Prometheus + Grafana + Alertmanager + node-exporter)
+  ansible.builtin.shell: |
+    helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+      --namespace monitoring --create-namespace \
+      --set grafana.adminPassword="{{ grafana_admin_password }}" \
+      --set grafana.service.type=NodePort \
+      --set grafana.service.nodePort={{ grafana_nodeport }} \
+      --set prometheus.service.type=NodePort \
+      --set prometheus.service.nodePort={{ prometheus_nodeport }} \
+      --set alertmanager.service.type=NodePort \
+      --set alertmanager.service.nodePort={{ alertmanager_nodeport }} \
+      --set prometheus.prometheusSpec.retention=7d \
+      --set prometheus.prometheusSpec.resources.requests.memory=512Mi \
+      --set prometheus.prometheusSpec.resources.limits.memory=1Gi \
+      --timeout 10m
+  when: prom_check.rc != 0
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+  changed_when: true
+
+- name: Grafana rollout 대기
+  ansible.builtin.command: >
+    kubectl rollout status deployment/kube-prometheus-stack-grafana
+    -n monitoring --timeout=300s
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+  changed_when: true
+
+- name: Prometheus + Grafana 접속 정보 출력
+  ansible.builtin.debug:
+    msg:
+      - "Grafana      : http://<worker-IP>:{{ grafana_nodeport }}  (admin / {{ grafana_admin_password }})"
+      - "Prometheus   : http://<worker-IP>:{{ prometheus_nodeport }}"
+      - "Alertmanager : http://<worker-IP>:{{ alertmanager_nodeport }}"

@@ -1,0 +1,63 @@
+# 로컬 시스템 상태 백업 / 실행 로그 — 공개 리포에 올리지 않는다
+backup/
+*.wfw
+*transcript*.txt
+
+# 자격증명 / 환경값
+.env
+.env.*
+*.pem
+*.key
+*-pairing*.txt
+
+# OS
+Thumbs.db
+.DS_Store
+
+# ─────────────────────────────────────────────────────────────
+# systems/ — 랩 공통 규칙.
+#
+# forfun 쪽 원본 규칙은 전부 `devops/systems/**` 접두사로 쓰여 있었는데 실제 경로는
+# `systems/**` 였다. 폴더를 옮기면서 .gitignore 를 안 고친 탓에 VM 디스크 이미지,
+# kubeconfig, 클러스터 join 시크릿이 아무것도 막히지 않는 상태였다. 그 사고를
+# 반복하지 않으려면 이 저장소의 폴더 구조가 바뀔 때마다 아래 접두사도 같이 고친다.
+# ─────────────────────────────────────────────────────────────
+
+# OpenTofu / Terraform 상태
+#   tfvars 는 랩마다 플레이스홀더라 의도적으로 커밋한다
+systems/**/.terraform/
+systems/**/*.tfstate
+systems/**/*.tfstate.*
+systems/**/.terraform.tfstate.lock.info
+systems/**/crash.log
+
+# VM 디스크 / 설치 이미지
+systems/**/*.vdi
+systems/**/*.vmdk
+systems/**/*.qcow2
+systems/**/*.img
+systems/**/*.iso
+systems/**/*.box
+systems/**/.vagrant/
+
+# 클러스터 자격증명 / join 시크릿
+systems/**/kubeconfig
+systems/**/kubeconfig-*
+systems/**/admin.conf
+systems/**/join-command.sh
+systems/**/worker_join.sh
+
+# 프로비저너 스크래치
+systems/**/*.retry
+systems/**/.ansible/
+systems/**/.cache/
+systems/**/.generated/
+systems/**/.lab/
+systems/**/tmp/
+
+# in-tree 로 클론되는 업스트림 레포
+systems/**/rook/
+systems/**/kubespray-repo/
+
+# 에이전트 로컬 설정
+**/.claude

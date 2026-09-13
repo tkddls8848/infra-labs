@@ -1,0 +1,5 @@
+---
+# Nitro 인스턴스에서 /dev/xvdd → /dev/nvme3n1
+beegfs_storage_device: /dev/nvme3n1
+beegfs_mgmtd_host: "{{ hostvars[groups['master'][0]].ansible_host }}"
+beegfs_version: "beegfs_7.4.6"

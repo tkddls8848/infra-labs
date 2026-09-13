@@ -1,0 +1,111 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+require "fileutils"
+
+# 노드 설정
+INVENTORY_PATH = File.expand_path("inventory/inventory.ini", __dir__)
+
+def parse_inventory(path)
+  hosts = {}
+  groups = Hash.new { |hash, key| hash[key] = [] }
+  section = nil
+
+  File.foreach(path) do |raw_line|
+    line = raw_line.strip
+    next if line.empty? || line.start_with?("#", ";")
+
+    if (match = line.match(/^\[([^]]+)\]$/))
+      section = match[1]
+      next
+    end
+
+    if section == "all"
+      hostname, *tokens = line.split
+      hosts[hostname] = tokens.to_h do |token|
+        key, value = token.split("=", 2)
+        [key, value]
+      end
+    elsif section && section != "all:vars" && !section.end_with?(":children")
+      groups[section] << line.split.first
+    end
+  end
+
+  [hosts, groups]
+end
+
+inventory_hosts, inventory_groups = parse_inventory(INVENTORY_PATH)
+workers = inventory_groups.fetch("kube_node")
+control_planes = inventory_groups.fetch("kube_control_plane")
+unknown_nodes = (workers + control_planes).uniq - inventory_hosts.keys
+raise "Inventory groups contain undefined hosts: #{unknown_nodes.join(', ')}" unless unknown_nodes.empty?
+raise "This lab expects exactly one control-plane node" unless control_planes.length == 1
+raise "Rook's replica-3 pools require at least three worker nodes" if workers.length < 3
+
+# Workers are brought up before the control plane so their SSH keys are scannable
+# when the control-plane provisioner runs. Topology and addresses come only from inventory.ini.
+ordered_hosts = workers + (inventory_hosts.keys - workers)
+K8S_CLUSTER = ordered_hosts.to_h do |hostname|
+  host_vars = inventory_hosts.fetch(hostname)
+  is_control_plane = control_planes.include?(hostname)
+  [hostname, {
+    :ip => host_vars.fetch("ansible_host"),
+    :cpus => is_control_plane ? 4 : 2,
+    :memory => 4096,
+    :ssh => Integer(host_vars.fetch("vagrant_ssh_port")),
+    :rook_disk_gb => workers.include?(hostname) ? 20 : nil,
+    :provision => is_control_plane ? ["./scripts/cluster/kubespray.sh", "./scripts/storage/rook-ceph.sh", "./scripts/addons/jenkins.sh", "./scripts/addons/monitoring.sh"] : nil
+  }]
+end
+
+# 환경 설정
+CLUSTER_NAME = "k8s-ubuntu2404-kubespray"
+
+Vagrant.configure("2") do |config|
+  K8S_CLUSTER.each do |hostname, info|
+    config.vm.define hostname do |cfg|
+      cfg.vm.box = "bento/ubuntu-24.04"
+      cfg.vm.host_name = hostname
+      
+      # 네트워크 설정
+      cfg.vm.network "private_network", ip: info[:ip]
+      cfg.vm.network "forwarded_port", guest: 22, host: info[:ssh], auto_correct: true, id: "ssh"
+      
+      # VirtualBox 설정
+      cfg.vm.provider "virtualbox" do |vb|
+        vb.name = hostname
+        vb.gui = false
+        vb.memory = info[:memory]
+        vb.cpus = info[:cpus]
+        vb.customize ["modifyvm", :id, "--groups", "/#{CLUSTER_NAME}"]
+
+        if info[:rook_disk_gb]
+          disk_dir = File.expand_path(".vagrant/disks", __dir__)
+          disk_path = File.join(disk_dir, "#{hostname}-rook.vdi")
+          FileUtils.mkdir_p(disk_dir)
+          unless File.exist?(disk_path)
+            vb.customize ["createhd", "--filename", disk_path, "--size", info[:rook_disk_gb] * 1024]
+          end
+          vb.customize ["storageattach", :id, "--storagectl", "SATA Controller", "--port", 1, "--device", 0, "--type", "hdd", "--medium", disk_path]
+        end
+      end
+
+      cfg.vm.provision "shell", privileged: true, inline: <<-'SHELL'
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        swapoff -a
+        sed -i '/\bswap\b/s/^[^#]/#&/' /etc/fstab
+        apt-get update
+        apt-get install -y lvm2
+        modprobe rbd || true
+      SHELL
+      
+      # 프로비저닝 스크립트 실행
+      if info[:provision]
+        info[:provision].each do |script|
+          cfg.vm.provision "shell", path: script, privileged: false
+        end
+      end
+    end
+  end
+end

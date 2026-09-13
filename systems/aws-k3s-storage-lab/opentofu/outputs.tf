@@ -1,0 +1,9 @@
+output "frontend_public_ip"         { value = module.ec2.frontend_public_ip }
+output "frontend_private_ip"        { value = module.ec2.frontend_private_ip }
+output "backend_public_ip"          { value = module.ec2.backend_public_ip }
+output "backend_private_ip"         { value = module.ec2.backend_private_ip }
+output "ami_id"                     { value = data.aws_ami.rhel9.id }
+output "ceph_osd_1_volume_id"       { value = module.ec2.ceph_osd_1_volume_id }
+output "ceph_osd_2_volume_id"       { value = module.ec2.ceph_osd_2_volume_id }
+output "beegfs_storage_1_volume_id" { value = module.ec2.beegfs_storage_1_volume_id }
+output "beegfs_storage_2_volume_id" { value = module.ec2.beegfs_storage_2_volume_id }

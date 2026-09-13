@@ -1,0 +1,10 @@
+# 이 파일은 04_csi_beegfs.sh 실행 시 BACKEND_PRIVATE_IP로 자동 생성됩니다.
+# 수동 생성 예시 (백엔드 auth-disable=true 환경):
+config:
+  beegfsClientConf:
+    connDisableAuthentication: "true"
+fileSystemSpecificConfigs:
+  - sysMgmtdHost: <BACKEND_PRIVATE_IP>
+    config:
+      beegfsClientConf:
+        connDisableAuthentication: "true"

@@ -1,0 +1,24 @@
+---
+# HA setup: controlPlaneEndpoint points to HAProxy on Bastion
+- name: Write kubeadm config (HA controlPlaneEndpoint = HAProxy on Bastion)
+  ansible.builtin.copy:
+    dest: /tmp/kubeadm-config.yaml
+    content: |
+      apiVersion: kubeadm.k8s.io/v1beta4
+      kind: ClusterConfiguration
+      controlPlaneEndpoint: "{{ control_plane_endpoint }}:6443"
+      networking:
+        podSubnet: {{ pod_cidr }}
+      ---
+      apiVersion: kubeproxy.config.k8s.io/v1alpha1
+      kind: KubeProxyConfiguration
+      mode: "nftables"
+
+- name: Run kubeadm init on master-1
+  ansible.builtin.command: >
+    kubeadm init
+    --node-name {{ master_node_name }}
+    --config /tmp/kubeadm-config.yaml
+    --upload-certs
+  args:
+    creates: /etc/kubernetes/admin.conf

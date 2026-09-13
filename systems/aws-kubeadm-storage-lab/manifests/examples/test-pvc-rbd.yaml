@@ -1,0 +1,29 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-pvc-rbd
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ceph-rbd
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod-rbd
+spec:
+  containers:
+  - name: test
+    image: busybox
+    command: ["/bin/sh", "-c", "echo 'ceph-rbd OK' > /data/test.txt && cat /data/test.txt && sleep 60"]
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: test-pvc-rbd
+  restartPolicy: Never

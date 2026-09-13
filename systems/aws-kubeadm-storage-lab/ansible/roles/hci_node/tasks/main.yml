@@ -1,0 +1,46 @@
+# BeeGFS DKMS 빌드에 필요 — inject_facts_as_vars=False이므로 ansible_facts['kernel'] 사용
+# Packer AMI 사용 시 worker.sh에서 linux-headers-$(uname -r) 설치됨
+- name: Install kernel headers for BeeGFS DKMS
+  ansible.builtin.apt:
+    name: "linux-headers-{{ ansible_facts['kernel'] }}"
+    state: present
+    update_cache: no
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  tags: [ami_base]
+
+# Packer AMI 사용 시 worker.sh에서 설치됨
+- name: Install HCI node extra packages
+  ansible.builtin.apt:
+    name: "{{ extra_packages }}"
+    state: present
+    update_cache: yes
+  retries: 3
+  delay: 5
+  register: apt_result
+  until: apt_result is succeeded
+  tags: [ami_base]
+
+# Packer AMI 사용 시 worker.sh에서 systemctl enable됨
+- name: Enable chrony time sync
+  ansible.builtin.systemd:
+    name: chrony
+    enabled: yes
+    state: started
+  tags: [ami_base]
+
+# Packer AMI 사용 시 worker.sh에서 /etc/modules-load.d/k8s.conf에 등록됨
+- name: Register Ceph kernel modules in modules-load.d
+  ansible.builtin.lineinfile:
+    path: /etc/modules-load.d/k8s.conf
+    line: "{{ item }}"
+  loop: "{{ ceph_modules }}"
+  tags: [ami_base]
+
+# modprobe는 런타임에만 수행 — AMI에서 즉시 로드 불가
+- name: Load Ceph kernel modules immediately
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: "{{ ceph_modules }}"
+  ignore_errors: yes

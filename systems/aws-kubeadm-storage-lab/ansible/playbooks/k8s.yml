@@ -1,0 +1,151 @@
+---
+# ── 0. Wait for SSH ──
+- name: Wait for nodes to boot and accept SSH
+  hosts: master:worker
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH connection (up to 5 min)
+      wait_for_connection:
+        timeout: 300
+        sleep: 5
+
+# ── 0.5. Worker 커널 6.8 고정 (BeeGFS 7.x 호환, K8s 설치 전 선행) ──
+# USE_PACKER_AMI=true 시 --skip-tags ami_base 로 스킵 (AMI에서 6.8 고정 완료)
+- name: Pin worker kernel to 6.8 for BeeGFS 7.x compatibility
+  hosts: worker
+  become: yes
+  tasks:
+    - import_role:
+        name: beegfs_prep
+        tasks_from: kernel_pin
+      tags: [ami_base]
+
+# ── 0.6. Worker 커널 버전 검증 게이트 (6.8 아니면 전체 중단) ──
+- name: Verify worker kernel is 6.8 before K8s install
+  hosts: worker
+  gather_facts: yes
+  tasks:
+    - name: Assert worker kernel is 6.8 family
+      assert:
+        that:
+          - ansible_facts['kernel'] is match('^6\\.8\\.')
+        fail_msg: >-
+          {{ inventory_hostname }} 커널이 6.8이 아닙니다 (현재: {{ ansible_facts['kernel'] }}).
+          커널 고정 실패 — K8s 설치를 중단합니다.
+        success_msg: "{{ inventory_hostname }}: {{ ansible_facts['kernel'] }} ✓"
+
+# ── 1. Bastion HAProxy setup (must exist before control-plane-endpoint is used) ──
+- name: Configure HAProxy on Bastion
+  hosts: localhost
+  connection: local
+  become: yes
+  roles:
+    - haproxy
+
+# ── 2. OS base configuration ──
+- name: OS base configuration
+  hosts: master:worker
+  become: yes
+  roles:
+    - node_base
+
+# ── 3. HCI node extra setup (worker only) ──
+- name: HCI node extra setup
+  hosts: worker
+  become: yes
+  roles:
+    - hci_node
+
+# ── 4. Cluster-wide common setup ──
+- name: Cluster-wide common setup
+  hosts: master:worker
+  become: yes
+  roles:
+    - cluster_setup
+
+# ── 5. K8s package install ──
+- name: Install K8s packages
+  hosts: master:worker
+  become: yes
+  roles:
+    - k8s_common
+
+# ── 6. Master-1 init ──
+- name: Master-1 kubeadm init
+  hosts: master
+  become: yes
+  roles:
+    - role: control_plane
+      when: >-
+        hostvars[inventory_hostname]['ec2_tags']['Name']
+        == project_name + '-master-1'
+
+# ── 7. CNI install (master-1 only) ──
+- name: Install CNI (Flannel)
+  hosts: master
+  become: no
+  roles:
+    - role: cni
+      when: >-
+        hostvars[inventory_hostname]['ec2_tags']['Name']
+        == project_name + '-master-1'
+
+# ── 8. Master-2/3 control-plane join ──
+- name: Master-2/3 control-plane join
+  hosts: master
+  become: yes
+  serial: 1
+  roles:
+    - role: control_plane_join
+      when: >-
+        hostvars[inventory_hostname]['ec2_tags']['Name']
+        != project_name + '-master-1'
+
+# ── 9. Worker join ──
+- name: Worker join
+  hosts: worker
+  become: yes
+  serial: 1
+  roles:
+    - worker
+
+# ── 10. Cluster addons (master-1 only) ──
+- name: Install cluster addons
+  hosts: master
+  become: no
+  roles:
+    - role: addons
+      when: >-
+        hostvars[inventory_hostname]['ec2_tags']['Name']
+        == project_name + '-master-1'
+
+# ── 11. Bastion /etc/hosts and SSH config ──
+- name: Configure Bastion /etc/hosts and SSH config
+  hosts: localhost
+  connection: local
+  become: yes
+  tasks:
+    - name: Register nodes in /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        line: >-
+          {{ hostvars[item]['ansible_host'] }}
+          {{ hostvars[item]['ec2_tags']['Name'] | regex_replace('k8s-storage-lab-', '') }}
+        state: present
+      loop: "{{ groups['all'] }}"
+
+    - name: Register SSH config entries
+      become: no
+      blockinfile:
+        path: /home/ubuntu/.ssh/config
+        create: yes
+        mode: '0600'
+        marker: "# {mark} k8s-storage-lab"
+        block: |
+          {% for host in groups['all'] %}
+          Host {{ hostvars[host]['ec2_tags']['Name'] | regex_replace('k8s-storage-lab-', '') }}
+            HostName {{ hostvars[host]['ansible_host'] }}
+            User ubuntu
+            IdentityFile ~/.ssh/storage-lab.pem
+            StrictHostKeyChecking no
+          {% endfor %}

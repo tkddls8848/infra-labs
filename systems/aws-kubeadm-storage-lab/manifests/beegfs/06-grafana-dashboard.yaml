@@ -1,0 +1,126 @@
+---
+# Grafana Dashboard ConfigMap
+# kube-prometheus-stack 의 sidecar가 label "grafana_dashboard: '1'" 을 감지해 자동 import
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: beegfs-grafana-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  beegfs-dashboard.json: |
+    {
+      "title": "BeeGFS Overview",
+      "uid": "beegfs-overview",
+      "schemaVersion": 36,
+      "version": 1,
+      "refresh": "30s",
+      "time": { "from": "now-1h", "to": "now" },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "Reachable Storage Nodes",
+          "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+          "targets": [
+            {
+              "expr": "beegfs_nodes_reachable{type=\"storage\"}",
+              "legendFormat": "storage"
+            }
+          ],
+          "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Reachable Meta Nodes",
+          "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+          "targets": [
+            {
+              "expr": "beegfs_nodes_reachable{type=\"meta\"}",
+              "legendFormat": "meta"
+            }
+          ],
+          "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } }
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Reachable Client Nodes",
+          "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+          "targets": [
+            {
+              "expr": "beegfs_nodes_reachable{type=\"client\"}",
+              "legendFormat": "client"
+            }
+          ],
+          "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } }
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Exporter Up",
+          "gridPos": { "x": 12, "y": 0, "w": 3, "h": 4 },
+          "targets": [
+            {
+              "expr": "beegfs_exporter_up",
+              "legendFormat": "up"
+            }
+          ],
+          "options": {
+            "colorMode": "background",
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "mappings": [
+              { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+            ]
+          }
+        },
+        {
+          "id": 5,
+          "type": "bargauge",
+          "title": "Storage Used / Total (per node)",
+          "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+          "targets": [
+            {
+              "expr": "beegfs_storage_total_bytes - beegfs_storage_free_bytes",
+              "legendFormat": "Used node={{node}}"
+            },
+            {
+              "expr": "beegfs_storage_total_bytes",
+              "legendFormat": "Total node={{node}}"
+            }
+          ],
+          "options": {
+            "orientation": "horizontal",
+            "reduceOptions": { "calcs": ["lastNotNull"] }
+          }
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Storage Free Bytes over Time",
+          "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+          "targets": [
+            {
+              "expr": "beegfs_storage_free_bytes",
+              "legendFormat": "Free node={{node}}"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "Metadata Free Bytes over Time",
+          "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+          "targets": [
+            {
+              "expr": "beegfs_meta_free_bytes",
+              "legendFormat": "Free node={{node}}"
+            }
+          ]
+        }
+      ],
+      "templating": { "list": [] },
+      "annotations": { "list": [] }
+    }

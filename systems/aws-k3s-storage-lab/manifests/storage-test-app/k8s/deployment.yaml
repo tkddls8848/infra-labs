@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storage-test-app
+  namespace: storage-test
+  labels:
+    app: storage-test-app
+spec:
+  # RBD는 ReadWriteOnce이므로 replicas=1 고정
+  replicas: 1
+  selector:
+    matchLabels:
+      app: storage-test-app
+  template:
+    metadata:
+      labels:
+        app: storage-test-app
+    spec:
+      # 모든 PVC가 바인딩될 때까지 대기
+      initContainers:
+        - name: wait-for-mounts
+          image: busybox
+          command:
+            - sh
+            - -c
+            - |
+              for dir in /mnt/cephfs /mnt/rbd /mnt/beegfs; do
+                until [ -d "$dir" ]; do
+                  echo "Waiting for $dir ..."; sleep 2
+                done
+                echo "$dir ready"
+              done
+          volumeMounts:
+            - name: cephfs-data
+              mountPath: /mnt/cephfs
+            - name: rbd-data
+              mountPath: /mnt/rbd
+            - name: beegfs-data
+              mountPath: /mnt/beegfs
+      containers:
+        - name: app
+          image: storage-test-app:latest
+          imagePullPolicy: IfNotPresent   # 로컬 빌드 이미지 사용
+          ports:
+            - containerPort: 8000
+          volumeMounts:
+            - name: cephfs-data
+              mountPath: /mnt/cephfs
+            - name: rbd-data
+              mountPath: /mnt/rbd
+            - name: beegfs-data
+              mountPath: /mnt/beegfs
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: cephfs-data
+          persistentVolumeClaim:
+            claimName: storage-test-cephfs
+        - name: rbd-data
+          persistentVolumeClaim:
+            claimName: storage-test-rbd
+        - name: beegfs-data
+          persistentVolumeClaim:
+            claimName: storage-test-beegfs

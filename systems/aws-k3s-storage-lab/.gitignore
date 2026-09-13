@@ -1,0 +1,25 @@
+# ── 시크릿 / 런타임 환경변수 ──────────────────────────
+# SSH 개인키
+*.pem
+
+# 런타임 환경변수 (IP, Ceph keyring 포함)
+lab.env
+
+# 접속 정보 (실제 IP 포함)
+ADDRESS.md
+
+# ── Terraform / OpenTofu ──────────────────────────────
+# 상태 파일 (인스턴스 ID, IP, 시크릿 포함 가능)
+opentofu/terraform.tfstate
+opentofu/terraform.tfstate.backup
+opentofu/*.tfstate*
+
+# 프로바이더 캐시 (수백 MB)
+opentofu/.terraform/
+
+# ── Packer ───────────────────────────────────────────
+packer/k3s-storage-lab/crash.log
+
+# ── 임시 로그 ─────────────────────────────────────────
+e.md
+*.log

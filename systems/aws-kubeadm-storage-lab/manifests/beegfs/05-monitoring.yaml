@@ -1,0 +1,220 @@
+---
+# BeeGFS Prometheus Exporter
+# beegfs-ctl (beegfs-utils) 가 master-1 호스트에 설치되어 있음을 전제로 함
+# chroot /host 패턴으로 호스트 바이너리 사용
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: beegfs-exporter-script
+  namespace: beegfs-system
+data:
+  exporter.py: |
+    #!/usr/bin/env python3
+    """
+    BeeGFS Prometheus Exporter
+    beegfs-ctl 출력을 파싱해 Prometheus 텍스트 형식으로 노출합니다.
+    """
+    import subprocess
+    import sys
+    import time
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+
+    import os
+    # beegfs-ctl 경로: Ubuntu 패키지 설치 위치 우선, fallback으로 opt 경로 시도
+    _CTL_CANDIDATES = ["/host/usr/sbin/beegfs-ctl", "/host/opt/beegfs/sbin/beegfs-ctl"]
+    BEEGFS_CTL = next((p for p in _CTL_CANDIDATES if os.path.isfile(p)), _CTL_CANDIDATES[0])
+    MGMTD_HOST = os.environ.get("BEEGFS_MGMTD_HOST", "beegfs-mgmtd.beegfs-system")
+
+    def run_beegfs_ctl(*args):
+        try:
+            result = subprocess.run(
+                [BEEGFS_CTL, f"--mgmtdhost={MGMTD_HOST}"] + list(args),
+                capture_output=True, text=True, timeout=10
+            )
+            return result.stdout, result.returncode
+        except Exception as e:
+            return "", 1
+
+    def collect_metrics():
+        lines = []
+
+        # ── 노드 목록 및 수 ──
+        for node_type, flag in [("storage", "--nodetype=storage"),
+                                  ("meta",    "--nodetype=meta"),
+                                  ("client",  "--nodetype=client")]:
+            out, rc = run_beegfs_ctl("--listnodes", flag, "--reachable")
+            count = len([l for l in out.splitlines() if l.strip()]) if rc == 0 else 0
+            lines.append(f'# HELP beegfs_nodes_reachable Number of reachable BeeGFS nodes')
+            lines.append(f'# TYPE beegfs_nodes_reachable gauge')
+            lines.append(f'beegfs_nodes_reachable{{type="{node_type}"}} {count}')
+
+        # ── 스토리지 풀 용량 ──
+        out, rc = run_beegfs_ctl("--df", "--nodetype=storage")
+        if rc == 0:
+            lines.append(f'# HELP beegfs_storage_total_bytes Total storage capacity in bytes')
+            lines.append(f'# TYPE beegfs_storage_total_bytes gauge')
+            lines.append(f'# HELP beegfs_storage_free_bytes Free storage capacity in bytes')
+            lines.append(f'# TYPE beegfs_storage_free_bytes gauge')
+            for line in out.splitlines():
+                parts = line.split()
+                # 형식: NodeID  Total  Free  ...
+                if len(parts) >= 3 and parts[0].isdigit():
+                    node_id = parts[0]
+                    try:
+                        total_kb = int(parts[1])
+                        free_kb  = int(parts[2])
+                        lines.append(f'beegfs_storage_total_bytes{{node="{node_id}"}} {total_kb * 1024}')
+                        lines.append(f'beegfs_storage_free_bytes{{node="{node_id}"}} {free_kb * 1024}')
+                    except ValueError:
+                        pass
+
+        # ── 메타데이터 풀 용량 ──
+        out, rc = run_beegfs_ctl("--df", "--nodetype=meta")
+        if rc == 0:
+            lines.append(f'# HELP beegfs_meta_total_bytes Total metadata capacity in bytes')
+            lines.append(f'# TYPE beegfs_meta_total_bytes gauge')
+            lines.append(f'# HELP beegfs_meta_free_bytes Free metadata capacity in bytes')
+            lines.append(f'# TYPE beegfs_meta_free_bytes gauge')
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 3 and parts[0].isdigit():
+                    node_id = parts[0]
+                    try:
+                        total_kb = int(parts[1])
+                        free_kb  = int(parts[2])
+                        lines.append(f'beegfs_meta_total_bytes{{node="{node_id}"}} {total_kb * 1024}')
+                        lines.append(f'beegfs_meta_free_bytes{{node="{node_id}"}} {free_kb * 1024}')
+                    except ValueError:
+                        pass
+
+        # ── exporter 자체 상태 ──
+        lines.append(f'# HELP beegfs_exporter_up Exporter is running')
+        lines.append(f'# TYPE beegfs_exporter_up gauge')
+        lines.append(f'beegfs_exporter_up 1')
+
+        return "\n".join(lines) + "\n"
+
+    class MetricsHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/metrics":
+                body = collect_metrics().encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, fmt, *args):
+            pass  # 로그 억제
+
+    if __name__ == "__main__":
+        port = int(sys.argv[1]) if len(sys.argv) > 1 else 9100
+        server = HTTPServer(("0.0.0.0", port), MetricsHandler)
+        print(f"BeeGFS exporter listening on :{port}/metrics", flush=True)
+        server.serve_forever()
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: beegfs-exporter
+  namespace: beegfs-system
+  labels:
+    app: beegfs-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: beegfs-exporter
+  template:
+    metadata:
+      labels:
+        app: beegfs-exporter
+    spec:
+      # master-1 (control-plane) 에 배치 — beegfs-utils 설치 위치
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          effect: NoSchedule
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      hostNetwork: false
+      containers:
+        - name: exporter
+          image: python:3.12-slim
+          command:
+            - /bin/sh
+            - -c
+            - |
+              cp /scripts/exporter.py /tmp/exporter.py
+              exec python3 /tmp/exporter.py 9100
+          env:
+            - name: BEEGFS_MGMTD_HOST
+              value: "beegfs-mgmtd.beegfs-system"
+          ports:
+            - containerPort: 9100
+              name: metrics
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+              readOnly: true
+            - name: exporter-script
+              mountPath: /scripts
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            privileged: false
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+        - name: exporter-script
+          configMap:
+            name: beegfs-exporter-script
+            defaultMode: 0755
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: beegfs-exporter
+  namespace: beegfs-system
+  labels:
+    app: beegfs-exporter
+spec:
+  selector:
+    app: beegfs-exporter
+  ports:
+    - name: metrics
+      port: 9100
+      targetPort: 9100
+
+---
+# ServiceMonitor — kube-prometheus-stack 이 자동으로 scrape 함
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: beegfs-exporter
+  namespace: beegfs-system
+  labels:
+    # kube-prometheus-stack Helm release 레이블과 일치해야 함
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - beegfs-system
+  selector:
+    matchLabels:
+      app: beegfs-exporter
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics

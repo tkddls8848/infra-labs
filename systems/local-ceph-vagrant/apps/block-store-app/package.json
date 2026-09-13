@@ -1,0 +1,23 @@
+{
+  "name": "ceph-block-store",
+  "version": "3.0.0",
+  "description": "Ceph RBD per-node block storage file app (central UI + per-node agents)",
+  "main": "app.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node app.js",
+    "central": "ROLE=central node app.js",
+    "agent": "ROLE=agent node app.js",
+    "dev": "nodemon app.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: storage-test-app
+  namespace: storage-test
+spec:
+  type: NodePort
+  selector:
+    app: storage-test-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+      nodePort: 30080   # http://<NODE_IP>:30080 으로 접근

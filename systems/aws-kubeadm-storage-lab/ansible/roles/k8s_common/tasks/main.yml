@@ -1,0 +1,45 @@
+- name: Create K8s keyrings directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+  tags: [ami_base]
+
+- name: Register K8s GPG key
+  ansible.builtin.shell: |
+    curl -fsSL \
+      https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/Release.key \
+    | gpg --dearmor \
+      -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  args:
+    creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  tags: [ami_base]
+
+- name: Add K8s APT repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg]
+      https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/ /
+    state: present
+    filename: kubernetes
+  tags: [ami_base]
+
+- name: Install kubeadm kubelet kubectl
+  ansible.builtin.apt:
+    name: [kubelet, kubeadm, kubectl]
+    state: present
+    update_cache: yes
+  tags: [ami_base]
+
+- name: Hold kubeadm kubelet kubectl versions
+  community.general.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop: [kubelet, kubeadm, kubectl]
+  tags: [ami_base]
+
+- name: Enable kubelet service
+  ansible.builtin.systemd:
+    name: kubelet
+    enabled: yes
+  tags: [ami_base]

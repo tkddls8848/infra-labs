@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: beegfs-storage
+  namespace: beegfs-system
+  labels:
+    app: beegfs-storage
+spec:
+  selector:
+    matchLabels:
+      app: beegfs-storage
+  template:
+    metadata:
+      labels:
+        app: beegfs-storage
+    spec:
+      hostNetwork: true
+      hostPID: true
+      nodeSelector:
+        role: "worker"
+      initContainers:
+        - name: wait-mgmtd
+          image: ubuntu:24.04
+          command:
+            - /bin/bash
+            - -c
+            - |
+              # ── 필수 패키지 확인: beegfs-storage + beegfs-utils
+              INSTALLED=$(chroot /host dpkg -l beegfs-storage beegfs-utils 2>/dev/null | grep -c '^ii' || echo 0)
+              if [ "$INSTALLED" -lt 2 ]; then
+                echo "=== BeeGFS storage 패키지 설치 중 (installed: ${INSTALLED}/2) ==="
+                chroot /host /bin/bash -c "apt-get update 2>&1 && apt-get install -y beegfs-storage beegfs-utils 2>&1" || {
+                  echo "ERROR: 패키지 설치 실패 (exit $?)"
+                  exit 1
+                }
+              fi
+
+              # ── mgmtd 호스트/포트를 conf에서 동적으로 읽기
+              MGMTD_HOST=$(grep -E '^sysMgmtdHost' /host/etc/beegfs/beegfs-storage.conf | awk '{print $3}')
+              MGMTD_PORT=$(grep -E '^connMgmtdPortTCP' /host/etc/beegfs/beegfs-storage.conf | awk '{print $3}')
+              MGMTD_PORT=${MGMTD_PORT:-8008}
+
+              # 컨테이너 내부 /etc/hosts ≠ 호스트 /etc/hosts 이므로
+              # hostname → IP를 호스트의 /etc/hosts에서 직접 조회
+              MGMTD_IP=$(awk -v h="$MGMTD_HOST" '!/^#/ && NF>=2 {for(i=2;i<=NF;i++) if($i==h){print $1; exit}}' /host/etc/hosts)
+              MGMTD_IP=${MGMTD_IP:-$MGMTD_HOST}
+              echo "mgmtd 연결 대기: ${MGMTD_HOST} → ${MGMTD_IP}:${MGMTD_PORT}"
+
+              until (echo > /dev/tcp/${MGMTD_IP}/${MGMTD_PORT}) 2>/dev/null; do
+                echo "mgmtd 대기 중..."; sleep 5
+              done
+              echo "mgmtd 응답 확인"
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+      containers:
+        - name: beegfs-storage
+          image: ubuntu:24.04
+          command:
+            - chroot
+            - /host
+            - /opt/beegfs/sbin/beegfs-storage
+            - cfgFile=/etc/beegfs/beegfs-storage.conf
+            - runDaemonized=false
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+            # /mnt/beegfs/storage는 별도 XFS 마운트이므로 명시적으로 주입
+            - name: storage-data
+              mountPath: /host/mnt/beegfs/storage
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+        - name: storage-data
+          hostPath:
+            path: /mnt/beegfs/storage

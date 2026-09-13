@@ -1,0 +1,13 @@
+---
+# master 그룹 facts 수집 (haproxy.cfg 백엔드 목록 생성용)
+- name: Master 노드 facts 수집
+  hosts: master
+  gather_facts: true
+  tasks: []
+
+- name: Bastion HAProxy 설치 및 설정
+  hosts: localhost
+  connection: local
+  become: yes
+  roles:
+    - haproxy

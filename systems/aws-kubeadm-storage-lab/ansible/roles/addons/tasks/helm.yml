@@ -1,0 +1,20 @@
+---
+- name: Helm 설치 여부 확인
+  ansible.builtin.command: which helm
+  register: helm_check
+  failed_when: false
+  changed_when: false
+
+- name: Helm 설치
+  ansible.builtin.shell: curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  when: helm_check.rc != 0
+  changed_when: true
+
+- name: Helm 버전 확인
+  ansible.builtin.command: helm version --short
+  register: helm_version
+  changed_when: false
+
+- name: Helm 버전 출력
+  ansible.builtin.debug:
+    msg: "Helm: {{ helm_version.stdout }}"

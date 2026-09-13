@@ -1,0 +1,18 @@
+- name: Install Flannel CNI
+  ansible.builtin.command: >
+    kubectl apply -f
+    https://github.com/flannel-io/flannel/releases/download/{{ flannel_version }}/kube-flannel.yml
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+  register: flannel_result
+  changed_when: "'created' in flannel_result.stdout or 'configured' in flannel_result.stdout"
+
+- name: Wait for CoreDNS rollout (up to 3 min)
+  ansible.builtin.command: kubectl rollout status deployment/coredns -n kube-system --timeout=180s
+  environment:
+    KUBECONFIG: /home/ubuntu/.kube/config
+  register: coredns_status
+  retries: 3
+  delay: 10
+  until: coredns_status.rc == 0
+  changed_when: true

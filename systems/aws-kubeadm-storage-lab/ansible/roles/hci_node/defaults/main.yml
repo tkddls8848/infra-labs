@@ -1,0 +1,10 @@
+---
+extra_packages:
+  - lvm2
+  - chrony
+  - linux-modules-extra-aws
+  - linux-headers-aws
+
+ceph_modules:
+  - rbd
+  - ceph

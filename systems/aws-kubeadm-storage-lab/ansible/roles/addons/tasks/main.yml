@@ -1,0 +1,14 @@
+---
+- import_tasks: helm.yml
+
+- import_tasks: metrics_server.yml
+  when: addon_metrics_server | bool
+
+- import_tasks: dashboard.yml
+  when: addon_dashboard | bool
+
+- import_tasks: prometheus_grafana.yml
+  when: addon_prometheus_grafana | bool
+
+- import_tasks: metallb.yml
+  when: addon_metallb | bool

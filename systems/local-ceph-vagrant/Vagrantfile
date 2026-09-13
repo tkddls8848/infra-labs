@@ -1,0 +1,276 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+#
+# local-ceph-vagrant — VirtualBox provider 로 구성하는 단일 monitor Ceph 실습 클러스터.
+# libvirt/KVM 로 같은 클러스터를 올리는 local-ceph-kvm 과는 별개의 클러스터 정의이며,
+# 두 시스템은 통합하지 않는다. provider 선택 기준과 차이점은 README.md 참고.
+
+# worker 프로비저닝과 private key 생성이 끝난 뒤 master를 프로비저닝한다.
+ENV['VAGRANT_NO_PARALLEL'] = 'yes'
+
+# ---------------------------------------------------------------------------
+# 인벤토리 파서
+#   inventory/inventory.ini 가 클러스터 사실(호스트 IP, OSD 디스크, public/cluster
+#   네트워크, mon/mgr 개수)의 단일 소스(single source of truth)이다.
+#   Vagrantfile 은 값을 다시 하드코딩하지 않고 여기서 읽어 쓰며,
+#   선언이 없거나 인벤토리와 어긋나면 vagrant up 단계에서 즉시 실패한다.
+# ---------------------------------------------------------------------------
+INVENTORY_PATH = File.expand_path("inventory/inventory.ini", File.dirname(__FILE__))
+
+def parse_inventory(path)
+  raise "인벤토리 파일을 찾을 수 없습니다: #{path}" unless File.exist?(path)
+
+  hosts   = {}
+  vars    = {}
+  section = nil
+
+  File.readlines(path).each do |raw|
+    line = raw.strip
+    next if line.empty? || line.start_with?("#", ";")
+
+    if line.start_with?("[")
+      section = line.delete("[]")
+      next
+    end
+
+    # [<group>:vars] 섹션은 key=value 한 줄씩
+    if section.to_s.end_with?(":vars")
+      key, value = line.split("=", 2)
+      vars[key.strip] = value.to_s.strip unless value.nil?
+      next
+    end
+
+    # 호스트 줄: "<host> k=v k=v ..." (그룹 멤버십만 있는 줄은 k=v 가 없어 무시된다)
+    fields = line.split(/\s+/)
+    host   = fields.shift
+    attrs  = {}
+    fields.each do |field|
+      key, value = field.split("=", 2)
+      attrs[key] = value unless value.nil?
+    end
+    hosts[host] = attrs unless attrs.empty?
+  end
+
+  { :hosts => hosts, :vars => vars }
+end
+
+INVENTORY = parse_inventory(INVENTORY_PATH)
+
+def inventory_var!(name)
+  value = INVENTORY[:vars][name]
+  if value.nil? || value.empty?
+    raise "인벤토리 [ceph:vars] 에 #{name} 선언이 없습니다: #{INVENTORY_PATH}"
+  end
+  value
+end
+
+# 실습 네트워크는 모두 /24 이므로 앞 3옥텟으로 소속을 판정한다.
+def cidr_prefix(cidr)
+  unless cidr.match?(%r{\A(?:\d{1,3}\.){3}\d{1,3}/24\z})
+    raise "이 실습은 /24 IPv4 CIDR만 지원합니다: #{cidr}"
+  end
+  cidr.split("/").first.split(".")[0, 3].join(".")
+end
+
+def in_network?(ip, cidr)
+  ip.split(".")[0, 3].join(".") == cidr_prefix(cidr)
+end
+
+# ---------------------------------------------------------------------------
+# 네트워크: public 과 cluster 는 반드시 서로 다른 네트워크여야 한다.
+#   public  = 클라이언트/모니터 트래픽, cluster = OSD 복제·리커버리 트래픽.
+#   같은 CIDR 로 접히면 분리 자체가 의미를 잃으므로 여기서 하드 실패시킨다.
+# ---------------------------------------------------------------------------
+CEPH_PUBLIC_NETWORK  = inventory_var!("ceph_public_network")
+CEPH_CLUSTER_NETWORK = inventory_var!("ceph_cluster_network")
+
+if CEPH_PUBLIC_NETWORK == CEPH_CLUSTER_NETWORK
+  raise "ceph_public_network 와 ceph_cluster_network 가 같은 CIDR(#{CEPH_PUBLIC_NETWORK}) 입니다. " \
+        "두 네트워크는 서로 다른 대역으로 분리되어야 합니다: #{INVENTORY_PATH}"
+end
+
+# 호스트별 public/cluster IP 를 인벤토리에서 읽고, 각각 올바른 네트워크에 속하는지 검증한다.
+# (여기서 얻은 두 IP 가 그대로 두 개의 private_network NIC 으로 붙는다)
+def node_ips!(hostname)
+  attrs = INVENTORY[:hosts][hostname]
+  raise "인벤토리에 #{hostname} 호스트 항목이 없습니다: #{INVENTORY_PATH}" if attrs.nil?
+
+  public_ip  = attrs["ansible_host"]
+  cluster_ip = attrs["cluster_ip"]
+  raise "#{hostname}: 인벤토리에 ansible_host(public IP) 선언이 없습니다" if public_ip.nil?
+  raise "#{hostname}: 인벤토리에 cluster_ip 선언이 없습니다"              if cluster_ip.nil?
+  if attrs.key?("public_ip") && attrs["public_ip"] != public_ip
+    raise "#{hostname}: public_ip(#{attrs['public_ip']})와 ansible_host(#{public_ip})가 다릅니다"
+  end
+
+  unless in_network?(public_ip, CEPH_PUBLIC_NETWORK)
+    raise "#{hostname}: public IP #{public_ip} 가 ceph_public_network(#{CEPH_PUBLIC_NETWORK}) 에 속하지 않습니다"
+  end
+  unless in_network?(cluster_ip, CEPH_CLUSTER_NETWORK)
+    raise "#{hostname}: cluster IP #{cluster_ip} 가 ceph_cluster_network(#{CEPH_CLUSTER_NETWORK}) 에 속하지 않습니다"
+  end
+
+  { :public => public_ip, :cluster => cluster_ip }
+end
+
+NETWORK_CONFIG = {
+  :master_ip              => node_ips!("ceph-master")[:public],
+  :network_prefix         => cidr_prefix(CEPH_PUBLIC_NETWORK),
+  :cluster_network_prefix => cidr_prefix(CEPH_CLUSTER_NETWORK)
+}
+
+# ---------------------------------------------------------------------------
+# OSD 디스크: 인벤토리에 osd_devices 로 선언된 디스크만 만들고, 그것만 OSD 로 쓴다.
+#   선언되지 않은 디스크는 어떤 스크립트도 건드리지 않는다.
+# ---------------------------------------------------------------------------
+OSD_DEVICES_BY_HOST = {}
+INVENTORY[:hosts].each do |host, attrs|
+  next unless attrs.key?("osd_devices")
+  list = attrs["osd_devices"].split(",").map { |d| d.strip }.reject { |d| d.empty? }
+  raise "#{host}: osd_devices 선언이 비어 있습니다: #{INVENTORY_PATH}" if list.empty?
+  OSD_DEVICES_BY_HOST[host] = list
+end
+
+if OSD_DEVICES_BY_HOST.empty?
+  raise "인벤토리에 osd_devices 를 선언한 storage 호스트가 없습니다: #{INVENTORY_PATH}"
+end
+
+# cephadm-setup.sh 는 storage 호스트 전체에 같은 디바이스 목록(CSV 인자)을 적용한다.
+# 호스트마다 목록이 다르면 조용히 어긋나므로 여기서 막는다.
+OSD_DEVICE_LISTS = OSD_DEVICES_BY_HOST.values.uniq
+if OSD_DEVICE_LISTS.length > 1
+  raise "storage 호스트마다 osd_devices 목록이 다릅니다(#{OSD_DEVICE_LISTS.inspect}). " \
+        "cephadm-setup.sh 는 단일 목록만 지원하므로 인벤토리를 일치시키세요: #{INVENTORY_PATH}"
+end
+CEPH_OSD_DEVICES = OSD_DEVICE_LISTS.first
+expected_virtualbox_devices = CEPH_OSD_DEVICES.each_index.map { |i| "/dev/sd#{('b'.ord + i).chr}" }
+if CEPH_OSD_DEVICES != expected_virtualbox_devices
+  raise "VirtualBox SATA OSD 디스크는 #{expected_virtualbox_devices.join(',')} 순서로 선언해야 합니다. " \
+        "현재 값: #{CEPH_OSD_DEVICES.join(',')} (#{INVENTORY_PATH})"
+end
+
+# 버전 관리 변수 (box 는 provider 사실, ceph 버전은 인벤토리 사실)
+VERSION_CONFIG = {
+  :ubuntu_box => "bento/ubuntu-24.04",   # VirtualBox 용 박스
+  :ceph       => inventory_var!("ceph_version")
+}
+
+# Ceph 클러스터 노드 자원 (IP 는 인벤토리에서 읽는다)
+CLUSTER_NAME = "ceph-cluster"
+CEPH_CLUSTER = {
+  "ceph-worker-1" => { :cpus => 4, :memory => 4096, :ssh_port => 22001 },
+  "ceph-worker-2" => { :cpus => 4, :memory => 4096, :ssh_port => 22002 },
+  "ceph-master"   => { :cpus => 6, :memory => 6144, :ssh_port => 22000 }
+}
+CEPH_WORKER_NODES = CEPH_CLUSTER.length - 1
+
+# Ceph 서비스 설정
+#   mon_count=1 / mgr_count=2 는 의도된 값이다: 이 랩은 단일 monitor 클러스터이며 non-HA 다.
+#   monitor 가 1개이므로 ceph-master 가 내려가면 쿼럼을 잃고 클러스터 전체가 정지한다.
+#   HA 가 필요하면 monitor 를 3개 이상(홀수)으로 늘려야 하지만, 이 실습 환경의 목적이 아니므로
+#   값을 바꾸지 않는다. 값의 단일 소스는 inventory 의 [ceph:vars] 이다.
+CEPH_SERVICES = {
+  :mon_count => inventory_var!("mon_count").to_i,
+  :mgr_count => inventory_var!("mgr_count").to_i,
+  :mds_count => 2     # MDS 개수 (CephFS용) — 클러스터 사실이 아닌 랩 기본값
+}
+
+# OSD 디스크 크기/저장 위치는 provider 사실이다. 개수는 선언된 디바이스 수에서 파생된다.
+CEPH_OSD = { :disk_size => 1024 * 10 }
+OSD_DISK_BASE_PATH = File.join(Dir.home, "vagrant_osd", CLUSTER_NAME)
+
+Vagrant.configure("2") do |config|
+  CEPH_CLUSTER.each do |hostname, info|
+    ips = node_ips!(hostname)
+
+    config.vm.define hostname do |cfg|
+      cfg.vm.box = VERSION_CONFIG[:ubuntu_box]
+      cfg.vm.host_name = hostname
+      # NIC 2개: public(클라이언트/mon) 과 cluster(OSD 복제) 를 물리적으로 분리한다.
+      cfg.vm.network "private_network", ip: ips[:public]
+      cfg.vm.network "private_network", ip: ips[:cluster]
+      cfg.vm.network "forwarded_port", guest: 22, host: info[:ssh_port], id: "ssh", auto_correct: true
+      cfg.vm.provider "virtualbox" do |vb|
+        vb.name = hostname
+        vb.memory = info[:memory]
+        vb.cpus = info[:cpus]
+        vb.customize ["modifyvm", :id, "--groups", "/#{CLUSTER_NAME}"]
+
+        # 워커 노드일 경우 OSD 디스크 추가.
+        # 인벤토리에 선언된 디바이스 개수만큼만 만들고, SATA 포트 순서(1,2,...)가
+        # 게스트의 /dev/sdb, /dev/sdc ... 순서와 1:1로 대응한다(포트 0 = OS 디스크).
+        if hostname.include? "worker"
+          devices = OSD_DEVICES_BY_HOST[hostname]
+          raise "#{hostname}: 인벤토리에 osd_devices 선언이 없습니다: #{INVENTORY_PATH}" if devices.nil?
+
+          devices.each_with_index do |device, i|
+            osd_disk = "#{OSD_DISK_BASE_PATH}/#{hostname}-osd-#{i}.vdi"
+            unless File.exist?(osd_disk)
+              vb.customize ['createhd', '--filename', osd_disk, '--size', CEPH_OSD[:disk_size], '--variant', 'Fixed']
+            end
+            # device(예: /dev/sdb) 는 이 포트에 붙는 디스크의 게스트 이름이다.
+            vb.customize ['storageattach', :id, '--storagectl', 'SATA Controller', '--port', 1 + i, '--device', 0, '--type', 'hdd', '--medium', osd_disk]
+            vb.customize ['setextradata', :id, "VBoxInternal/Devices/ahci/0/Config/Port#{1 + i}/NonRotational", "1"] # SSD 설정 추가
+          end
+        end
+      end
+
+      # 노드 공통 설정 (공통 설치 스크립트)
+      cfg.vm.provision "shell", path: "./scripts/ceph/common-setup.sh",
+        args: ["#{NETWORK_CONFIG[:master_ip]}", "#{NETWORK_CONFIG[:network_prefix]}", "#{CEPH_WORKER_NODES}"],
+        env: {
+          "CEPH_PUBLIC_NETWORK"  => CEPH_PUBLIC_NETWORK,
+          "CEPH_CLUSTER_NETWORK" => CEPH_CLUSTER_NETWORK
+        }
+
+      # 마스터 노드 설정
+      if hostname == "ceph-master"
+        # 블록 스토어 앱 소스를 master에 마운트 (ansible로 워커에 배포). 앱 폴더명 변경 시 경로도 수정.
+        cfg.vm.synced_folder "./apps/block-store-app", "/opt/ceph-block-store-src"
+        # 같은 앱의 Go 구현. 두 구현을 같은 RBD 마운트 위에 나란히 띄워 비교한다.
+        # 배포는 dist/ 에 빌드된 바이너리가 있을 때만 일어난다(없으면 건너뛴다) —
+        # Go 툴체인이 없는 호스트에서도 기존 랩이 그대로 동작해야 하기 때문이다.
+        #   호스트에서: bash apps/block-store-app-go/scripts/build.sh
+        cfg.vm.synced_folder "./apps/block-store-app-go", "/opt/ceph-block-store-go-src"
+        # Ceph 설치 및 설정 (OSD 준비 통합).
+        # 마지막 인자 = 인벤토리에서 읽은 OSD 디바이스 CSV. 디스크를 만지는 모든 경로는 이 값만 사용한다.
+        cfg.vm.provision "shell", path: "./scripts/ceph/cephadm-setup.sh", name: "cephadm",
+          args: ["#{NETWORK_CONFIG[:network_prefix]}", "#{CEPH_WORKER_NODES}", "#{VERSION_CONFIG[:ceph]}", "#{CEPH_SERVICES[:mon_count]}", "#{CEPH_SERVICES[:mgr_count]}", "#{CEPH_OSD_DEVICES.join(',')}"],
+          env: {
+            "CEPH_PUBLIC_NETWORK"  => CEPH_PUBLIC_NETWORK,
+            "CEPH_CLUSTER_NETWORK" => CEPH_CLUSTER_NETWORK
+          },
+          privileged: true
+        # Filesystem Storage 설치
+        cfg.vm.provision "shell", path: "./scripts/ceph/cephadm-cephfs.sh", name: "cephfs",
+          args: ["#{NETWORK_CONFIG[:network_prefix]}", "#{NETWORK_CONFIG[:master_ip]}", "#{CEPH_SERVICES[:mds_count]}"],
+          privileged: true
+        # block Storage 설치
+        cfg.vm.provision "shell", path: "./scripts/ceph/cephadm-rbd.sh", name: "cephrbd",
+          args: ["#{NETWORK_CONFIG[:network_prefix]}", "#{NETWORK_CONFIG[:master_ip]}"],
+          privileged: true
+        # Grafana, prometheus 설치 (Ceph RBD 선행 필수)
+        cfg.vm.provision "shell", path: "./scripts/ceph/monitoring-setup.sh", name: "monitoring",
+          privileged: true
+        # Object Storage 설치 (s3cmd)
+        cfg.vm.provision "shell", path: "./scripts/ceph/cephadm-object-storage.sh", name: "cephobject",
+          args: ["#{NETWORK_CONFIG[:network_prefix]}", "#{NETWORK_CONFIG[:master_ip]}"],
+          privileged: true
+        # OSD Heartbeat 최적화 스크립트 실행 (I/O 스케줄러는 인벤토리 선언 디스크에만 적용)
+        cfg.vm.provision "shell", path: "./scripts/ceph/fix-osd-heartbeat.sh", name: "osdheartbeat",
+          args: ["/vagrant/inventory/inventory.ini"],
+          privileged: true
+        # 블록 스토어 앱 배포 (master 중앙앱 + 워커 에이전트, ansible)
+        cfg.vm.provision "shell", path: "./scripts/ceph/block-store-app-setup.sh", name: "blockstoreapp",
+          args: ["#{NETWORK_CONFIG[:network_prefix]}", "#{CEPH_WORKER_NODES}"],
+          env: {
+            "AGENT_TOKEN" => "ceph-block-store-secret",
+            "APP_SRC"     => "/opt/ceph-block-store-src",
+            "GO_APP_SRC"  => "/opt/ceph-block-store-go-src",
+            "RBD_POOL"    => "rbd-pool"
+          },
+          privileged: true
+      end
+    end
+  end
+end

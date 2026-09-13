@@ -1,0 +1,72 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+require "yaml"
+
+# Versions and the pod CIDR come from the main lab inventory.
+GROUP_VARS_PATH = File.expand_path("../../../inventory/group_vars.yml", __dir__)
+GROUP_VARS = YAML.safe_load(File.read(GROUP_VARS_PATH), aliases: false)
+KUBE_VERSION = GROUP_VARS.fetch("kubernetes_version")
+FLANNEL_VERSION = GROUP_VARS.fetch("flannel_version")
+
+NETWORK_CONFIG = {
+  :pod_cidr => GROUP_VARS.fetch("pod_cidr"), # Flannel pod network CIDR
+  :master_ip => "192.168.60.10",
+  :network_prefix => "192.168.60"
+}
+
+K8S_CLUSTER = {
+  "k8s-master" => { :role => "control_plane", :ip => NETWORK_CONFIG[:master_ip], :cpus => 4, :memory => 4096, :ssh_port => 22000 },
+  "k8s-worker-1" => { :role => "worker", :ip => "#{NETWORK_CONFIG[:network_prefix]}.11", :cpus => 2, :memory => 2048, :ssh_port => 22001 },
+  "k8s-worker-2" => { :role => "worker", :ip => "#{NETWORK_CONFIG[:network_prefix]}.12", :cpus => 2, :memory => 2048, :ssh_port => 22002 }
+}
+
+K8S_WORKER_NODES = K8S_CLUSTER.values.count { |node| node[:role] == "worker" }
+JOIN_FILE = "/vagrant/.generated/kubeadm/join-command.sh"
+
+Vagrant.configure("2") do |config|
+  K8S_CLUSTER.each do |hostname, info|
+    config.vm.define hostname do |cfg|
+      cfg.vm.box = "bento/ubuntu-22.04"
+      cfg.vm.host_name = hostname
+
+      cfg.vm.network "private_network", ip: info[:ip]
+      cfg.vm.network "forwarded_port", guest: 22, host: info[:ssh_port], id: "ssh", auto_correct: true
+
+      cfg.vm.provider "virtualbox" do |vb|
+        vb.name = hostname
+        vb.memory = info[:memory]
+        vb.cpus = info[:cpus]
+        vb.customize ["modifyvm", :id, "--groups", "/k8s-kubevirt"]
+      end
+
+      cfg.vm.provision "shell", path: "../../cluster/kubeadm-setup.sh",
+        args: [
+          NETWORK_CONFIG[:master_ip],
+          NETWORK_CONFIG[:network_prefix],
+          K8S_WORKER_NODES,
+          KUBE_VERSION
+        ]
+
+      if info[:role] == "control_plane"
+        cfg.vm.provision "shell", path: "../../cluster/kubeadm-master.sh",
+          args: [
+            NETWORK_CONFIG[:master_ip],
+            NETWORK_CONFIG[:pod_cidr],
+            FLANNEL_VERSION,
+            KUBE_VERSION,
+            JOIN_FILE
+          ]
+        # Install only during the explicit post-cluster provision command documented
+        # in README.md; installing while `vagrant up` is still creating workers can
+        # make the readiness checks wait on nodes that do not exist yet.
+        if ENV["INSTALL_KUBEVIRT"] == "1"
+          cfg.vm.provision "shell", path: "./scripts/kubevirt-setup.sh"
+        end
+      else
+        cfg.vm.provision "shell", path: "../../cluster/kubeadm-worker.sh",
+          args: [JOIN_FILE]
+      end
+    end
+  end
+end

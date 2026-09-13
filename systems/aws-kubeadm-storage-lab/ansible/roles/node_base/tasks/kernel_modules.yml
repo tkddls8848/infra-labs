@@ -1,0 +1,24 @@
+---
+# Ubuntu 24.04 default firewall: nftables
+# - overlay     : containerd overlay filesystem
+# - br_netfilter: route bridge traffic through netfilter/nftables (required for CNI)
+# - nf_tables   : nftables kernel module (required for kube-proxy nftables mode)
+# - nft_masq    : nftables MASQUERADE support (required for Pod -> external SNAT)
+- name: Register kernel modules in modules-load.d
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/k8s.conf
+    content: |
+      overlay
+      br_netfilter
+      nf_tables
+      nft_masq
+
+- name: Load kernel modules immediately
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - overlay
+    - br_netfilter
+    - nf_tables
+    - nft_masq

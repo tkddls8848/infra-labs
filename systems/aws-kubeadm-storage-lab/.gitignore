@@ -1,0 +1,19 @@
+# ── 시크릿 ────────────────────────────────────────────
+# SSH 개인키
+*.pem
+
+# ── Terraform / OpenTofu ──────────────────────────────
+# 상태 파일 (인스턴스 ID, IP 등 포함)
+opentofu/terraform.tfstate
+opentofu/terraform.tfstate.backup
+opentofu/*.tfstate*
+
+# 프로바이더 캐시 (수백 MB)
+opentofu/.terraform/
+
+# ── Claude Code ───────────────────────────────────────
+# 로컬 권한 설정 (프로젝트별 개인 설정)
+.claude/settings.local.json
+
+# ── 임시 로그 ─────────────────────────────────────────
+*.log
