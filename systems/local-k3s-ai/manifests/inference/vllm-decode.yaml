@@ -1,0 +1,161 @@
+# vllm-decode.yaml — 모델 서버(vLLM) 와, 글 4장의 '그냥 Service' 경로.
+#
+# 여기에는 두 가지가 같이 들어 있다.
+#
+#   Deployment/decode        실제 추론 엔진. 5장에서 llm-d 의 InferencePool 이
+#                            고를 대상이 되는 파드들이다.
+#   Service/vllm-baseline    평범한 ClusterIP Service. kube-proxy 가 iptables
+#                            규칙으로 엔드포인트 중 하나를 확률적으로 고른다.
+#                            글에서 "LLM 에서는 성능을 떨어뜨린다"고 한 그 경로다.
+#
+# 두 경로가 같은 파드 집합을 가리킨다는 점이 이 랩의 핵심이다. 모델 서버는
+# 그대로 두고 앞단만 바꿔 가며 캐시 히트율을 비교한다.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: __NAMESPACE__
+---
+# 레플리카들이 HuggingFace 가중치를 각자 내려받지 않도록 캐시를 공유한다.
+# K3s 기본 local-path 프로비저너를 쓴다. 단일 노드라 RWO 볼륨을 같은 노드의
+# 여러 파드가 함께 마운트할 수 있다.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache
+  namespace: __NAMESPACE__
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 30Gi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: modelserver
+  namespace: __NAMESPACE__
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: decode
+  namespace: __NAMESPACE__
+  labels:
+    llm-d.ai/model: __MODEL_LABEL__
+    llm-d.ai/role: decode
+spec:
+  # 02_modelserver_up.sh 는 1로 띄워 가중치를 받게 한 뒤 목표치까지 늘린다.
+  # 레플리카 셋이 동시에 같은 캐시 디렉터리로 내려받게 두지 않기 위해서다.
+  replicas: 1
+  selector:
+    matchLabels:
+      llm-d.ai/model: __MODEL_LABEL__
+      llm-d.ai/role: decode
+  template:
+    metadata:
+      labels:
+        llm-d.ai/model: __MODEL_LABEL__
+        llm-d.ai/role: decode
+    spec:
+      serviceAccountName: modelserver
+      # K3s 에서 nvidia.com/gpu 를 요청하는 것만으로는 런타임이 바뀌지 않는다.
+      # 이 RuntimeClass 가 있어야 컨테이너가 호스트 드라이버를 본다.
+      runtimeClassName: nvidia
+      containers:
+        - name: modelserver
+          image: __VLLM_IMAGE__
+          command: ["vllm", "serve"]
+          args:
+            - "__MODEL_ID__"
+            - "--port=8000"
+            - "--max-model-len=__MAX_MODEL_LEN__"
+            # time-slicing 은 VRAM 을 나누지 않는다. 레플리카가 서로의 메모리를
+            # 밟지 않도록 여기서 각자의 몫을 직접 정해 준다.
+            - "--gpu-memory-utilization=__GPU_MEMORY_UTILIZATION__"
+            # 이 랩이 관찰하려는 바로 그 기능. vLLM V1 에서는 기본으로 켜지지만
+            # 실습의 전제를 매니페스트에 드러내 두려고 명시한다.
+            - "--enable-prefix-caching"
+            - "--disable-access-log-for-endpoints=/health,/metrics,/v1/models"
+          env:
+            # 가중치 캐시를 PVC 로 보낸다.
+            - name: HF_HOME
+              value: /models
+            # vLLM v0.20+ (torch 2.11) 가 HOME/USER 없이 뜨지 않는 문제의 회피책.
+            # 상류 llm-d 의 이미지 컴포넌트가 넣는 것과 같은 값이다.
+            - name: USER
+              value: llm-d
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: llm-d-hf-token
+                  key: HF_TOKEN
+                  optional: true
+          ports:
+            - name: modelserver
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "__VLLM_CPU_REQUEST__"
+              memory: "__VLLM_MEMORY_REQUEST__"
+              nvidia.com/gpu: 1
+            limits:
+              memory: "__VLLM_MEMORY_LIMIT__"
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: shm
+              mountPath: /dev/shm
+          # 가중치 다운로드 + CUDA 그래프 캡처까지 시간이 걸린다. startupProbe 가
+          # 넉넉해야 첫 기동에서 liveness 에 걸려 재시작 루프에 빠지지 않는다.
+          startupProbe:
+            httpGet:
+              path: /v1/models
+              port: modelserver
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 120
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: modelserver
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: modelserver
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+---
+# 글 4장의 비교 대상. 상태를 전혀 모르는 평범한 부하 분산.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-baseline
+  namespace: __NAMESPACE__
+  labels:
+    llm-d.ai/model: __MODEL_LABEL__
+spec:
+  type: ClusterIP
+  selector:
+    llm-d.ai/model: __MODEL_LABEL__
+    llm-d.ai/role: decode
+  ports:
+    - name: http
+      port: 8000
+      targetPort: modelserver
+      protocol: TCP

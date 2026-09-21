@@ -47,6 +47,10 @@ systems/**/admin.conf
 systems/**/join-command.sh
 systems/**/worker_join.sh
 
+# 파이썬 바이트코드 — bench/ 도구를 돌리면 생긴다
+__pycache__/
+*.pyc
+
 # 프로비저너 스크래치
 systems/**/*.retry
 systems/**/.ansible/

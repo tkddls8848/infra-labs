@@ -1,0 +1,97 @@
+# nvidia-device-plugin.yaml — time-slicing 을 켠 NVIDIA device plugin.
+#
+# 상류의 static 매니페스트
+#   https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.17.0/deployments/static/nvidia-device-plugin.yml
+#   (sha256 9c3f98fcff31690f94042b07a6127d1cc8ee2699886bf171f7634c67badf0abc)
+# 를 기준으로 이 랩에 필요한 세 가지를 더한 사본이다. 상류 파일을 받아서 패치하지
+# 않고 사본을 두는 이유는, 더해야 할 것이 ConfigMap 마운트와 RuntimeClass 라서
+# 패치가 원본만큼 길어지고 대신 읽기는 더 어려워지기 때문이다.
+#
+#   1. ConfigMap — 물리 GPU 1장을 nvidia.com/gpu N개로 광고하는 time-slicing 설정
+#   2. --config-file 인자와 그 마운트
+#   3. runtimeClassName: nvidia — K3s 가 nvidia-container-toolkit 을 탐지하면
+#      스스로 만드는 RuntimeClass. 이게 없으면 플러그인 컨테이너가 드라이버를
+#      보지 못해 GPU 0개를 보고한다.
+#
+# ⚠️ time-slicing 은 SM 실행 시간만 나눈다. VRAM 은 나누지 않는다. 같은 GPU 에
+#    올라간 파드들은 전체 메모리를 함께 보고 각자 예약하므로, vLLM 쪽에서
+#    --gpu-memory-utilization 으로 직접 갈라 줘야 한다 (vllm-decode.yaml 참고).
+#    격리도 없다 — 한 파드가 OOM 을 내면 옆 파드가 같이 죽을 수 있다. 랩 전용이다.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-device-plugin-config
+  namespace: kube-system
+data:
+  config.yaml: |
+    version: v1
+    flags:
+      migStrategy: none
+    sharing:
+      timeSlicing:
+        # true 로 두면 같은 GPU 의 슬라이스를 한 파드에 여러 개 줄 수 있다.
+        # 랩에서는 파드당 한 장씩만 받게 두는 편이 관찰하기 쉽다.
+        failRequestsGreaterThanOne: true
+        resources:
+          - name: nvidia.com/gpu
+            replicas: __GPU_TIME_SLICING_REPLICAS__
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin-daemonset
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: nvidia-device-plugin-ds
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        name: nvidia-device-plugin-ds
+      annotations:
+        # ConfigMap 이 바뀌어도 DaemonSet 파드는 저절로 다시 뜨지 않는다.
+        # 01_gpu_timeslicing.sh 가 적용 후 rollout restart 를 건다.
+        llm-d-lab.local/config-source: nvidia-device-plugin-config
+    spec:
+      runtimeClassName: nvidia
+      priorityClassName: "system-node-critical"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: nvidia-device-plugin-ctr
+          image: __DEVICE_PLUGIN_IMAGE__
+          args:
+            - --config-file=/etc/nvidia-device-plugin/config.yaml
+          env:
+            - name: FAIL_ON_INIT_ERROR
+              value: "false"
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+            - name: config
+              mountPath: /etc/nvidia-device-plugin
+              readOnly: true
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+        - name: config
+          configMap:
+            name: nvidia-device-plugin-config
+            items:
+              - key: config.yaml
+                path: config.yaml

@@ -19,7 +19,7 @@ Kubernetes·Ceph·BeeGFS·Hadoop 등 인프라 학습 랩을 모아둔 저장소
 | [`local-ceph-kvm/`](systems/local-ceph-kvm/) | libvirt/KVM 기반 로컬 Ceph 랩 |
 | [`local-ceph-vagrant/`](systems/local-ceph-vagrant/) | VirtualBox 기반 로컬 Ceph 랩 |
 | [`local-hadoop-vagrant/`](systems/local-hadoop-vagrant/) | Ubuntu Vagrant Hadoop 랩 |
-| [`local-k3s-ai/`](systems/local-k3s-ai/) | 로컬 K3s AI 랩 |
+| [`local-k3s-ai/`](systems/local-k3s-ai/) | 로컬 K3s AI 랩 + vLLM·llm-d 추론 라우팅 실습 |
 | [`local-kubeadm-gpu/`](systems/local-kubeadm-gpu/) | KVM 마스터 + 베어메탈 GPU 워커 클러스터 |
 | [`local-kubeadm-vagrant/`](systems/local-kubeadm-vagrant/) | 로컬 kubeadm Vagrant 랩 |
 | [`local-kubespray-cephfs-rocky9/`](systems/local-kubespray-cephfs-rocky9/) | Rocky Linux 9 Kubespray + Rook CephFS |
