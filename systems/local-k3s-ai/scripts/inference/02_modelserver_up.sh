@@ -59,4 +59,10 @@ for pod in $(modelserver_pods); do
     | sed 's/^/    /' || echo "    (지표를 읽지 못했습니다)"
 done
 
+cat <<'NOTE'
+
+되돌리려면 (네임스페이스와 내려받은 모델 가중치까지 사라진다):
+  scripts/inference/90_rollback.sh 02
+
+NOTE
 log "완료. 다음: scripts/inference/03_measure_baseline.sh"

@@ -5,7 +5,7 @@
 | 구성 | 내용 |
 |---|---|
 | [`scripts/addons/ai.sh`](scripts/addons/ai.sh) | K3s 단일 노드 설치 (선택적으로 K3AI) |
-| [`scripts/inference/`](scripts/inference/) | 추론 라우팅 실습 — vLLM · llm-d · InferencePool |
+| [`scripts/inference/`](scripts/inference/) | 추론 라우팅 실습 — vLLM · llm-d · InferencePool (단계별 롤백 포함) |
 | [`LAB-inference.md`](LAB-inference.md) | **실습 가이드**. 단계별로 무엇을 보고 무엇을 확인하는지 |
 | [`config/inference.env`](config/inference.env) | 추론 실습의 단일 설정 원천 |
 | [`bench/`](bench/) | 멀티턴 부하 · A/B 비교 · 실시간 관측 도구 |
@@ -138,21 +138,58 @@ vLLM 레플리카들은 전체 메모리를 함께 보고 각자 `--gpu-memory-u
 또한 time-slicing 에는 **격리가 없다.** 한 파드의 CUDA OOM 이 같은 GPU 의 다른
 파드를 같이 죽일 수 있다. 랩 전용이고, 운영에 쓸 구성이 아니다.
 
+## 1부와의 관계 — 무엇을 빌려 쓰고 무엇을 남기는가
+
+2부는 **1부가 설치한 K3s 클러스터를 그대로 빌려 쓴다.** 별도 클러스터를 만들지
+않고, K3s 를 설치하지도 않는다. `00_preflight.sh` 가 접속을 확인하고, 없으면
+`scripts/addons/ai.sh` 를 먼저 돌리라고 알려 준다.
+
+그래서 2부는 자기 네임스페이스 밖도 건드린다. 어디를 건드리는지 명시한다.
+
+| 범위 | 무엇 | 만드는 단계 |
+|---|---|---|
+| 네임스페이스 `llm-d-lab` | vLLM Deployment, Service, PVC, 라우터 | 02, 04 |
+| `kube-system` | device plugin DaemonSet + time-slicing ConfigMap | 01 |
+| 클러스터 스코프 | InferencePool CRD | 04 |
+| 호스트 | 없음 | — |
+
+K3s 자체, `nvidia` RuntimeClass, 1부가 만든 것은 **어느 단계에서도 건드리지
+않는다.**
+
 ## 파괴적 작업 정책
 
-일반 단계는 기존 상태를 지우지 않는다. `90_teardown.sh` 는 기본적으로 이 랩의
-네임스페이스만 지운다. CRD 와 device plugin 은 클러스터의 다른 워크로드가 함께
-쓸 수 있으므로 `--all` 을 명시할 때만 건드린다. K3s 자체는 어느 경우에도
-건드리지 않는다.
+**앞으로 가는 단계는 남의 것을 덮어쓰지 않는다.** 01 과 04 는 `kube-system` 의
+device plugin 과 클러스터 스코프 CRD 를 만들기 전에 이미 있는지 확인한다. 있는데
+이 랩이 만든 것이 아니면 — GPU Operator, 다른 랩, 수동 설치 — 덮어쓰지 않고
+멈추거나(device plugin) 기존 것을 그대로 쓴다(CRD). 이 랩이 만든 리소스에는
+`local-k3s-ai.lab/owner: inference` 어노테이션이 붙는다.
+
+**되돌리는 것은 표시된 것만 지운다.** [`90_rollback.sh`](scripts/inference/90_rollback.sh)
+는 단계를 골라 그 이전 상태로 되돌린다. 저장소의
+[`local-kubeadm-gpu/06_rollback.sh`](../local-kubeadm-gpu/06_rollback.sh) 와 같은
+방식이다.
+
+| 명령 | 되돌리는 범위 | 남는 것 |
+|---|---|---|
+| `90_rollback.sh 07` | 받아 둔 llm-d 체크아웃 | 클러스터 전부 |
+| `90_rollback.sh results` | 실습 결과 JSON | 클러스터 전부 |
+| `90_rollback.sh 06` | 라우터 설정을 기본값으로 복원 | 라우터·모델 서버 |
+| `90_rollback.sh 04` | 라우터, (이 랩이 만든) CRD | 모델 서버 — 실습 A 는 계속 가능 |
+| `90_rollback.sh 02` | + 네임스페이스, 모델 가중치 | GPU 공유 설정 |
+| `90_rollback.sh 01` | + device plugin (이 랩 것일 때만) | K3s, RuntimeClass |
+
+인자 없이 실행하면 메뉴가 나오고, 실행 전에 확인을 받는다. `--yes` 로 생략한다.
+`all` 은 `01` 과 같다. K3s 까지 지우려면 1부의 `k3s-uninstall.sh` 를 쓴다.
 
 `06_saturation.sh` 는 라우터 설정을 일부러 망가뜨리는 실습이라, 어떻게 끝나든
-(정상·실패·Ctrl-C) 원래 값으로 되돌린다.
+(정상·실패·Ctrl-C) 스스로 원래 값으로 되돌린다. 그래도 꼬였다면
+`90_rollback.sh 06` 이 확실히 복원한다.
 
 ## 생성물
 
 스크립트는 `.generated/` 아래에만 쓴다. `.gitignore` 의 `systems/**/.generated/`
 규칙으로 커밋되지 않는다. 여기에는 렌더된 매니페스트, 받아 둔 차트, 실습 결과
-JSON, llm-d 상류 체크아웃이 들어간다. `90_teardown.sh --all` 이 지운다.
+JSON, llm-d 상류 체크아웃이 들어간다. `90_rollback.sh` 가 되돌리는 범위에 맞춰 지운다.
 
 ## 버전 갱신
 

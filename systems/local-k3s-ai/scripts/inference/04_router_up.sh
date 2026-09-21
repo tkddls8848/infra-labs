@@ -19,10 +19,24 @@ kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 \
 # Gateway API Inference Extension. InferencePool 은 표준 리소스이고, llm-d 는
 # 그 구현 중 하나일 뿐이다 — 글에서 말한 "상류 표준을 따른다"가 이 부분이다.
 observe "1단계 — InferencePool CRD (Gateway API Inference Extension ${GAIE_VERSION})"
-GAIE_FILE="${LAB_GENERATED}/gaie-${GAIE_VERSION}-v1-manifests.yaml"
-fetch_verified "GAIE" "$GAIE_MANIFEST_URL" "$GAIE_MANIFEST_SHA256" "$GAIE_FILE"
-kubectl apply -f "$GAIE_FILE"
-kubectl get crd inferencepools.inference.networking.k8s.io \
+GAIE_CRD="inferencepools.inference.networking.k8s.io"
+
+# CRD 는 클러스터 스코프다. 이미 다른 설치본이 쓰고 있다면 버전을 바꿔 끼우는
+# 순간 그쪽의 기존 InferencePool 들이 스키마와 어긋날 수 있다. 남의 것은 건드리지
+# 않고 그대로 쓴다 — 롤백도 우리가 만든 것만 지운다.
+if resource_exists crd "$GAIE_CRD" && ! lab_owns crd "$GAIE_CRD"; then
+  warn "InferencePool CRD 가 이미 있고 이 랩이 만든 것이 아닙니다. 그대로 사용합니다."
+  warn "버전이 다르면 라우터 설치가 실패할 수 있습니다:"
+  kubectl get crd "$GAIE_CRD" \
+    -o custom-columns='CRD:.metadata.name,VERSIONS:.spec.versions[*].name' >&2
+  warn "이 CRD 는 롤백 대상에서 제외됩니다 (다른 워크로드가 쓰고 있을 수 있음)."
+else
+  GAIE_FILE="${LAB_GENERATED}/gaie-${GAIE_VERSION}-v1-manifests.yaml"
+  fetch_verified "GAIE" "$GAIE_MANIFEST_URL" "$GAIE_MANIFEST_SHA256" "$GAIE_FILE"
+  kubectl apply -f "$GAIE_FILE"
+  mark_owned crd "$GAIE_CRD"
+fi
+kubectl get crd "$GAIE_CRD" \
   -o custom-columns='CRD:.metadata.name,GROUP:.spec.group,VERSIONS:.spec.versions[*].name'
 
 # ── 2. 라우터 차트 ──────────────────────────────────────────────────────────
@@ -94,4 +108,10 @@ observe "엔드포인트 — 라우터가 고를 수 있는 모델 서버들"
 kubectl -n "$NAMESPACE" get pods -l "llm-d.ai/model=${MODEL_LABEL}" \
   -o custom-columns='POD:.metadata.name,IP:.status.podIP,READY:.status.containerStatuses[0].ready'
 
+cat <<'NOTE'
+
+되돌리려면 (모델 서버는 그대로 두고 라우터만 걷어낸다):
+  scripts/inference/90_rollback.sh 04
+
+NOTE
 log "완료. 다음: scripts/inference/05_measure_router.sh"

@@ -22,6 +22,20 @@
 
 ## 준비물
 
+이 실습은 **1부에서 설치한 K3s 클러스터를 그대로 빌려 쓴다.** 별도 클러스터를
+만들지 않고, K3s 를 설치하지도 않는다. 아직 없다면 먼저:
+
+```bash
+bash scripts/addons/ai.sh
+```
+
+그 위에서 실습이 추가로 만드는 것은 네임스페이스 `llm-d-lab`, `kube-system` 의
+device plugin, 그리고 InferencePool CRD 세 가지뿐이다. 무엇이 어디에 생기고
+어떻게 되돌리는지는 [README 의 "1부와의 관계"](README.md#1부와의-관계--무엇을-빌려-쓰고-무엇을-남기는가)
+와 이 문서의 [되돌리기](#되돌리기) 에 있다.
+
+필요한 것:
+
 - NVIDIA GPU 1장 (VRAM 8 GiB 이상, 16 GiB 이상 권장)
 - 호스트: NVIDIA 드라이버 + `nvidia-container-toolkit`
 - K3s (이 랩의 `scripts/addons/ai.sh` 로 설치)
@@ -306,14 +320,36 @@ GPU 가 2장 이상 생기면 `.generated/llm-d-v0.9.0/guides/pd-disaggregation/
 
 ---
 
-## 정리
+## 되돌리기
+
+각 단계에는 짝이 되는 역작업이 있다. `90_rollback.sh` 에 단계 번호를 주면 그
+단계를 실행하기 **이전 상태**로 돌아간다 (그 단계를 포함해 이후가 역순으로 제거).
 
 ```bash
-scripts/inference/90_teardown.sh          # 이 랩의 네임스페이스만
-scripts/inference/90_teardown.sh --all    # + CRD, device plugin, 생성물
+scripts/inference/90_rollback.sh          # 메뉴에서 고른다
+scripts/inference/90_rollback.sh 04       # 라우터만 걷어낸다 — 모델 서버는 남는다
+scripts/inference/90_rollback.sh 01 --yes # 전체 제거, 확인 없이
 ```
 
-K3s 자체는 남는다. 클러스터까지 지우려면 `sudo /usr/local/bin/k3s-uninstall.sh`.
+| 명령 | 되돌리는 것 | 남는 것 |
+|---|---|---|
+| `results` | 실습 결과 JSON | 클러스터 전부 |
+| `07` | llm-d 체크아웃 | 클러스터 전부 |
+| `06` | 라우터 설정 기본값 복원 | 라우터·모델 서버 |
+| `04` | 라우터, (이 랩이 만든) CRD | 모델 서버 — **3단계는 계속 돌릴 수 있다** |
+| `02` | + 네임스페이스, 모델 가중치 | GPU 공유 설정 |
+| `01` | + device plugin | K3s, `nvidia` RuntimeClass |
+
+실습을 다시 하고 싶을 때 처음부터 갈 필요가 없다는 게 요점이다. 예를 들어
+라우터 설정을 여러 가지로 바꿔 보고 싶으면 `04` 로만 되돌리면 된다 — 모델
+가중치를 다시 받지 않아도 된다.
+
+**K3s 는 어느 경우에도 남는다.** 이 랩은 1부가 설치한 클러스터를 빌려 쓸 뿐이다.
+클러스터까지 지우려면 `sudo /usr/local/bin/k3s-uninstall.sh`.
+
+> `kube-system` 의 device plugin 과 클러스터 스코프 CRD 는 **이 랩이 만든 것으로
+> 표시된 경우에만** 지운다. 원래 다른 것이 관리하고 있었다면 남긴다. 반대로
+> 앞으로 가는 단계도 그런 리소스를 덮어쓰지 않고 멈춘다.
 
 ---
 

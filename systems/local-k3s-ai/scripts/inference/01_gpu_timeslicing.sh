@@ -22,11 +22,23 @@ observe "적용 전 노드의 GPU capacity"
 echo "노드: $NODE"
 echo "nvidia.com/gpu capacity = $(gpu_capacity || echo '(없음 — device plugin 미설치)')"
 
+# 이 랩은 기존 K3s 클러스터를 빌려 쓴다. kube-system 에 이미 다른 것이 관리하는
+# device plugin 이 있을 수 있다 (GPU Operator, 다른 랩, 수동 설치). 덮어쓰면
+# 그쪽이 조용히 망가지므로 먼저 확인한다.
+claim_or_refuse -n kube-system daemonset nvidia-device-plugin-daemonset \
+  "kube-system 의 DaemonSet/nvidia-device-plugin-daemonset"
+claim_or_refuse -n kube-system configmap nvidia-device-plugin-config \
+  "kube-system 의 ConfigMap/nvidia-device-plugin-config"
+
 render_manifest "${LAB_MANIFESTS}/nvidia-device-plugin.yaml" \
                 "${LAB_GENERATED}/nvidia-device-plugin.yaml"
 
 log "device plugin 적용 (time-slicing replicas=${GPU_TIME_SLICING_REPLICAS})"
 kubectl apply -f "${LAB_GENERATED}/nvidia-device-plugin.yaml"
+
+# 롤백이 '우리가 만든 것만' 지울 수 있도록 표시를 남긴다.
+mark_owned -n kube-system daemonset nvidia-device-plugin-daemonset
+mark_owned -n kube-system configmap nvidia-device-plugin-config
 
 # ConfigMap 만 바뀐 경우 DaemonSet 파드는 그대로 남아 예전 설정을 계속 쓴다.
 # 재적용을 반복해도 결과가 같도록 항상 한 번 굴린다.
@@ -56,4 +68,10 @@ if [[ "$CAP" != "$GPU_TIME_SLICING_REPLICAS" ]]; then
   die "GPU 공유 설정이 반영되지 않아 다음 단계로 갈 수 없습니다."
 fi
 
+cat <<'NOTE'
+
+되돌리려면:
+  scripts/inference/90_rollback.sh 01
+
+NOTE
 log "완료. 다음: scripts/inference/02_modelserver_up.sh"

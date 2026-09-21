@@ -37,6 +37,58 @@ load_config() {
   mkdir -p "$LAB_GENERATED"
 }
 
+# ── 소유권 표시 ──────────────────────────────────────────────────────────────
+# 이 랩은 자기 네임스페이스 밖도 건드린다 — kube-system 의 device plugin 과
+# 클러스터 스코프 CRD 다. 기존 K3s 클러스터를 빌려 쓰는 구조라서, 이미 다른
+# 것이 관리하고 있는 리소스를 말없이 덮어쓰면 그 워크로드가 조용히 망가진다.
+#
+# 그래서 우리가 만든 것에만 표시를 남기고, 롤백은 표시된 것만 지운다.
+# 표시가 없는 리소스를 마주치면 덮어쓰지 않고 멈춘다.
+LAB_OWNER_ANNOTATION="local-k3s-ai.lab/owner"
+LAB_OWNER_VALUE="inference"
+
+# 리소스가 존재하는가. 있으면 0, 없으면 1.
+resource_exists() {
+  kubectl get "$@" >/dev/null 2>&1
+}
+
+# 이 랩이 만든 것인가.
+# 어노테이션 키에 점과 슬래시가 둘 다 들어 있어 jsonpath 로 한 키만 집으면
+# 이스케이프 규칙에 걸린다. 맵을 통째로 받아 대조하는 편이 안전하다.
+lab_owns() {
+  kubectl get "$@" -o jsonpath='{.metadata.annotations}' 2>/dev/null \
+    | grep -Fq "\"${LAB_OWNER_ANNOTATION}\":\"${LAB_OWNER_VALUE}\""
+}
+
+# 적용하기 전에 부른다. 이미 있는데 우리 것이 아니면 멈춘다.
+# $1 이후는 kubectl 인자, 마지막 인자는 사람이 읽을 설명.
+claim_or_refuse() {
+  local description="${!#}"
+  local args=("${@:1:$#-1}")
+  if resource_exists "${args[@]}"; then
+    if lab_owns "${args[@]}"; then
+      log "기존 것을 갱신한다 (이 랩이 만든 것): ${description}"
+    else
+      die "${description} 가 이미 있고, 이 랩이 만든 것이 아닙니다.
+
+  덮어쓰면 그것을 관리하던 쪽(GPU Operator, 다른 랩, 수동 설치)이 망가집니다.
+  직접 확인한 뒤 선택하세요:
+
+    kubectl get ${args[*]} -o yaml
+
+  쓰던 것을 그대로 두고 이 랩을 포기하거나, 그쪽을 먼저 제거하고 다시 오세요."
+    fi
+  else
+    log "새로 만든다: ${description}"
+  fi
+}
+
+# 적용한 뒤에 부른다. 우리 것이라는 표시를 남긴다.
+mark_owned() {
+  kubectl annotate "$@" "${LAB_OWNER_ANNOTATION}=${LAB_OWNER_VALUE}" --overwrite >/dev/null \
+    || warn "소유권 표시에 실패했습니다: $*  (롤백이 이 리소스를 건너뛸 수 있습니다)"
+}
+
 require_cmd() {
   local cmd
   for cmd in "$@"; do
