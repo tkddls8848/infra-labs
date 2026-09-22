@@ -36,11 +36,12 @@ device plugin, 그리고 InferencePool CRD 세 가지뿐이다. 무엇이 어디
 
 필요한 것:
 
-- NVIDIA GPU 1장 (VRAM 8 GiB 이상, 16 GiB 이상 권장)
+- NVIDIA GPU 1장 (VRAM 6 GiB 이상 — 기본 설정이 이 크기 기준이다)
 - 호스트: NVIDIA 드라이버 + `nvidia-container-toolkit`
 - K3s (이 랩의 `scripts/addons/ai.sh` 로 설치)
 - `kubectl`, `helm` 3.8+, `python3`, `git`, `curl`
-- 디스크 여유 30 GiB 이상 (모델 가중치 + 컨테이너 이미지)
+- 호스트 RAM 16 GiB 이상 (기본 설정의 파드 요청 합계는 약 8.4 GiB)
+- 디스크 여유 30 GiB 이상 (대부분은 vLLM 컨테이너 이미지다. 가중치는 1 GiB 남짓)
 - 인터넷 (HuggingFace, ghcr.io, docker.io)
 
 파이썬 패키지 설치는 필요 없다. 부하 도구는 표준 라이브러리만 쓴다.
@@ -54,9 +55,12 @@ cd systems/local-k3s-ai
 less config/inference.env
 ```
 
-GPU VRAM 이 8~12 GiB 라면 `REPLICAS=2` 로 줄이는 편이 안전하다.
-`REPLICAS × GPU_MEMORY_UTILIZATION` 이 0.95 를 넘으면 레플리카들이 서로
-VRAM 을 빼앗아 CUDA OOM 으로 죽는다. 0단계가 이걸 먼저 잡아 준다.
+기본값은 VRAM 6 GiB · RAM 16 GiB 를 기준으로 한 실습용 최소 크기다
+(`REPLICAS=2`, `GPU_MEMORY_UTILIZATION=0.40`, vLLM 파드당 4Gi). VRAM 이
+12 GiB 이상이면 `REPLICAS=3` / `GPU_MEMORY_UTILIZATION=0.30` 으로 올려 차이를
+더 크게 볼 수 있다. `REPLICAS × GPU_MEMORY_UTILIZATION` 이 0.95 를 넘으면
+레플리카들이 서로 VRAM 을 빼앗아 CUDA OOM 으로 죽는다. 0단계가 이걸 먼저
+잡아 준다.
 
 ---
 
@@ -71,7 +75,11 @@ scripts/inference/00_preflight.sh
 - `RuntimeClass/nvidia 없음` → `nvidia-container-toolkit` 설치 후
   `sudo systemctl restart k3s`. K3s 는 기동할 때 런타임을 탐지해 RuntimeClass 를
   스스로 만든다.
-- `레플리카당 2 GiB 미만` → `config/inference.env` 에서 `REPLICAS` 를 낮춘다.
+- `레플리카당 2 GiB 미만` → `GPU_MEMORY_UTILIZATION` 을 올린다. 단
+  `REPLICAS × 값 < 0.95` 를 지켜야 하므로, VRAM 이 약 4.4 GiB 미만이면 두 조건을
+  동시에 만족할 수 없다 — 더 작은 모델로 바꿔야 한다.
+- `요청 합계가 노드 용량 이상` → `VLLM_MEMORY_REQUEST` 를 낮추거나 노드 메모리를
+  늘린다. WSL 이면 `%USERPROFILE%\.wslconfig` 의 `memory` 값이다.
 
 ---
 
@@ -110,10 +118,11 @@ scripts/inference/02_modelserver_up.sh
 ```
 
 첫 실행은 가중치를 받느라 몇 분 걸린다. 스크립트는 레플리카 1개로 받아 둔 뒤
-나머지를 늘린다 — 셋이 동시에 같은 캐시 디렉터리로 내려받으면 락을 기다리며
+나머지를 늘린다 — 여럿이 동시에 같은 캐시 디렉터리로 내려받으면 락을 기다리며
 오히려 느려진다.
 
-**보게 되는 것**: 파드 3개, GPU 1장, 그리고 Service 뒤의 엔드포인트 3개.
+**보게 되는 것**: 파드 `REPLICAS`개(기본 2개), GPU 1장, 그리고 Service 뒤의
+같은 수의 엔드포인트.
 
 **직접 확인할 것 — 이게 이 랩 전체의 전제다**
 
@@ -126,7 +135,7 @@ for p in $(kubectl -n llm-d-lab get pods -l llm-d.ai/role=decode -o name | cut -
 done
 ```
 
-세 파드가 각각 자기 숫자를 들고 있다. **KV 캐시는 파드 로컬이다.**
+파드마다 각각 자기 숫자를 들고 있다. **KV 캐시는 파드 로컬이다.**
 공유 캐시도, 복제도 없다. 글 4.2 의 "3번 파드에는 캐시가 없으니 처음부터
 다시 연산" 이 성립하는 이유가 이것이다.
 
@@ -146,8 +155,9 @@ bench/watch.sh
 
 **읽는 법**
 
-- **접두사 캐시 히트율** — 파드 3개면 대체로 30%대. 대화의 앞부분이 매 턴
-  똑같은데도 히트가 안 난다. 캐시를 가진 파드로 가지 않았다는 뜻이다.
+- **접두사 캐시 히트율** — 파드 수의 역수 근처 (2개면 50%대, 3개면 30%대).
+  대화의 앞부분이 매 턴 똑같은데도 히트가 안 난다. 캐시를 가진 파드로 가지
+  않았다는 뜻이다.
 - **파드별 요청 분포** — 거의 균등하다. Service 는 제 할 일을 잘했다.
   일반 웹 서비스였다면 이게 정답이다.
 - 그 **공평함이** 재연산 비용으로 돌아온다는 게 글 4장의 요지다.

@@ -80,13 +80,14 @@ DEVOCEAN 기술블로그 "쿠버네티스로 여는 AI 추론 인프라"(최용�
 
 ## 추가 호스트 요구사항
 
-- NVIDIA GPU 1장 (VRAM 8 GiB 이상, 16 GiB 이상 권장)
+- NVIDIA GPU 1장 (VRAM 6 GiB 이상 — 기본 설정이 이 크기 기준이다)
 - NVIDIA 드라이버 + `nvidia-container-toolkit`
   (설치 후 `sudo systemctl restart k3s` — K3s 가 기동 시 탐지해 `nvidia`
   RuntimeClass 를 만든다)
 - `helm` 3.8 이상 (OCI 레지스트리에서 차트를 받는다)
 - `python3`, `git`
-- 디스크 30 GiB 이상
+- 호스트 RAM 16 GiB 이상 (기본 설정의 파드 요청 합계는 약 8.4 GiB)
+- 디스크 30 GiB 이상 (대부분은 vLLM 컨테이너 이미지다. 가중치는 1 GiB 남짓)
 
 ## 고정 버전 (세트)
 
@@ -126,6 +127,7 @@ vLLM 레플리카들은 전체 메모리를 함께 보고 각자 `--gpu-memory-u
 
 | VRAM | 권장 `REPLICAS` | 권장 `GPU_MEMORY_UTILIZATION` | 레플리카당 |
 |---:|---:|---:|---:|
+| 6 GiB | 2 | 0.40 | ≈ 2.4 GiB ← 기본값 |
 | 8 GiB | 2 | 0.40 | ≈ 3.2 GiB |
 | 12 GiB | 3 | 0.28 | ≈ 3.3 GiB |
 | 16 GiB | 3 | 0.30 | ≈ 4.8 GiB |
@@ -134,6 +136,13 @@ vLLM 레플리카들은 전체 메모리를 함께 보고 각자 `--gpu-memory-u
 
 `00_preflight.sh` 가 곱이 0.95 이상이거나 레플리카당 2 GiB 미만이면 막는다.
 레플리카가 2개 미만이면 "여러 파드에 흩어진다"는 실습 전제 자체가 사라진다.
+그래서 `REPLICAS=2` 가 이 랩의 하한이고, VRAM 이 약 4.4 GiB 미만이면 두 조건을
+동시에 만족할 수 없다 — 그런 GPU 에서는 더 작은 모델을 써야 한다.
+
+VRAM 만 맞으면 되는 것이 아니다. vLLM 은 호스트 RAM 도 쓰고, 그 몫은 노드
+allocatable 에서 나온다. `00_preflight.sh` 6단계가 `REPLICAS × VLLM_MEMORY_REQUEST`
+에 EPP·Envoy 를 더한 합계를 노드 용량과 대조한다. 여기서 막히면 두 번째
+레플리카가 `Pending` 으로 남았을 상황을 미리 잡은 것이다.
 
 또한 time-slicing 에는 **격리가 없다.** 한 파드의 CUDA OOM 이 같은 GPU 의 다른
 파드를 같이 죽일 수 있다. 랩 전용이고, 운영에 쓸 구성이 아니다.

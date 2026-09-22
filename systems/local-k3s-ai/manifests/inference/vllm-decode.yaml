@@ -19,6 +19,10 @@ metadata:
 # 레플리카들이 HuggingFace 가중치를 각자 내려받지 않도록 캐시를 공유한다.
 # K3s 기본 local-path 프로비저너를 쓴다. 단일 노드라 RWO 볼륨을 같은 노드의
 # 여러 파드가 함께 마운트할 수 있다.
+#
+# 크기는 config/inference.env 의 MODEL_CACHE_SIZE 다. local-path 는 hostPath
+# 기반이라 이 숫자로 용량을 강제하지는 않지만, 다른 스토리지 클래스로 옮기면
+# 그대로 요구되는 값이므로 실제 필요량에 맞춰 둔다.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -28,7 +32,7 @@ spec:
   accessModes: ["ReadWriteOnce"]
   resources:
     requests:
-      storage: 30Gi
+      storage: __MODEL_CACHE_SIZE__
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -76,6 +80,9 @@ spec:
             # 이 랩이 관찰하려는 바로 그 기능. vLLM V1 에서는 기본으로 켜지지만
             # 실습의 전제를 매니페스트에 드러내 두려고 명시한다.
             - "--enable-prefix-caching"
+            # 이 랩의 부하는 동시 4 다. 상류 기본값은 훨씬 큰 동시성을 상정해
+            # 스케줄러 자료구조를 그만큼 미리 잡으므로, 실습 크기로 줄인다.
+            - "--max-num-seqs=__MAX_NUM_SEQS__"
             - "--disable-access-log-for-endpoints=/health,/metrics,/v1/models"
           env:
             # 가중치 캐시를 PVC 로 보낸다.
@@ -139,7 +146,7 @@ spec:
         - name: shm
           emptyDir:
             medium: Memory
-            sizeLimit: 2Gi
+            sizeLimit: __SHM_SIZE__
 ---
 # 글 4장의 비교 대상. 상태를 전혀 모르는 평범한 부하 분산.
 apiVersion: v1

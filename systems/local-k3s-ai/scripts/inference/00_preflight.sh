@@ -80,12 +80,36 @@ if [[ "$VRAM_MIB" -gt 0 ]]; then
   echo "     레플리카당 예약 ≈ ${PER_REPLICA_MIB} MiB (전체 ${VRAM_MIB} MiB 중)"
   # 가중치 + KV 캐시가 들어가야 접두사 캐시 실습이 의미를 갖는다.
   if [[ "$PER_REPLICA_MIB" -lt 2048 ]]; then
-    check_fail "레플리카당 2 GiB 미만입니다. KV 캐시 블록이 거의 남지 않아 접두사 캐시 실습이 성립하지 않습니다. REPLICAS 를 2 로 줄이거나 더 작은 모델을 쓰세요."
+    check_fail "레플리카당 2 GiB 미만입니다. KV 캐시 블록이 거의 남지 않아 접두사 캐시 실습이 성립하지 않습니다. GPU_MEMORY_UTILIZATION 을 올리세요 (REPLICAS 와의 곱은 0.95 미만이어야 합니다). 둘을 동시에 만족할 수 없으면 — VRAM 이 약 4.4 GiB 미만이면 — 더 작은 모델을 써야 합니다. REPLICAS 는 2 미만으로 내릴 수 없습니다."
   else
     check_ok "레플리카당 KV 캐시 여유 있음"
   fi
 fi
 
+echo
+echo "── 6. 노드 메모리 vs 파드 요청 합계 ───────────────────────────"
+# VRAM 만 보고 넘어가면 두 번째 레플리카가 Pending 으로 남는 것을 여기서 못 잡는다.
+# vLLM 은 GPU 만큼이나 호스트 RAM 을 쓰고, 그 몫은 노드 allocatable 에서 나온다.
+ALLOCATABLE="$(kubectl get nodes -o jsonpath='{.items[0].status.allocatable.memory}' 2>/dev/null || true)"
+if [[ -n "$ALLOCATABLE" ]]; then
+  ALLOC_MIB="$(mem_to_mib "$ALLOCATABLE")"
+  REQ_MIB=$(( $(mem_to_mib "$VLLM_MEMORY_REQUEST") * REPLICAS \
+              + $(mem_to_mib "$EPP_MEMORY_REQUEST") \
+              + $(mem_to_mib "$PROXY_MEMORY_REQUEST") ))
+  echo "     요청 합계 ${REQ_MIB} MiB (vLLM ${VLLM_MEMORY_REQUEST} x ${REPLICAS} + EPP + Envoy)"
+  echo "     노드 allocatable ${ALLOC_MIB} MiB"
+  if [[ "$REQ_MIB" -ge "$ALLOC_MIB" ]]; then
+    check_fail "요청 합계가 노드 용량 이상입니다. 파드가 Pending 으로 남습니다. config/inference.env 의 VLLM_MEMORY_REQUEST 를 낮추거나 노드 메모리를 늘리세요 (WSL 이면 .wslconfig 의 memory)."
+  elif awk -v r="$REQ_MIB" -v a="$ALLOC_MIB" 'BEGIN{exit !(r > a * 0.85)}'; then
+    warn "요청 합계가 노드 용량의 85% 를 넘습니다. K3s 자체와 시스템 파드가 쓸 몫이 빠듯합니다."
+  else
+    check_ok "요청 합계가 노드 용량에 들어갑니다"
+  fi
+else
+  echo "     (클러스터에 접속하지 못해 건너뜁니다)"
+fi
+
+echo
 if [[ "$GPU_COUNT" -gt 1 ]]; then
   echo "     GPU ${GPU_COUNT} 장 감지 — 07_pd_anatomy.sh 의 구조를 실제로 올려 볼 여지가 있습니다 (상류 pd-disaggregation 가이드 참고)."
 fi

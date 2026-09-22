@@ -96,6 +96,24 @@ require_cmd() {
   done
 }
 
+# 쿠버네티스 수량 표기를 MiB 정수로 바꾼다. "8Gi" "512Mi" "16344872Ki" 등.
+# 노드가 실제로 담을 수 있는 크기와 요청 합계를 비교할 때 쓴다.
+mem_to_mib() {
+  awk -v s="$1" 'BEGIN{
+    if (!match(s, /^[0-9.]+/)) { print 0; exit }
+    n = substr(s, RSTART, RLENGTH) + 0
+    u = substr(s, RSTART + RLENGTH)
+    if      (u == "Gi") m = n * 1024
+    else if (u == "Mi") m = n
+    else if (u == "Ki") m = n / 1024
+    else if (u == "G")  m = n * 1000000000 / 1048576
+    else if (u == "M")  m = n * 1000000 / 1048576
+    else if (u == "K" || u == "k") m = n * 1000 / 1048576
+    else m = n / 1048576
+    printf "%d", m
+  }'
+}
+
 # 원격 파일을 받고 sha256 을 대조한다. 불일치면 적용하지 않고 멈춘다.
 # 저장소 정책: kubectl apply -f <URL> 로 미검증 원격 매니페스트를 적용하지 않는다.
 fetch_verified() {
@@ -132,6 +150,9 @@ render_manifest() {
     -e "s|__MODEL_LABEL__|${MODEL_LABEL}|g" \
     -e "s|__REPLICAS__|${REPLICAS}|g" \
     -e "s|__MAX_MODEL_LEN__|${MAX_MODEL_LEN}|g" \
+    -e "s|__MAX_NUM_SEQS__|${MAX_NUM_SEQS}|g" \
+    -e "s|__MODEL_CACHE_SIZE__|${MODEL_CACHE_SIZE}|g" \
+    -e "s|__SHM_SIZE__|${SHM_SIZE}|g" \
     -e "s|__GPU_MEMORY_UTILIZATION__|${GPU_MEMORY_UTILIZATION}|g" \
     -e "s|__DEVICE_PLUGIN_IMAGE__|${DEVICE_PLUGIN_IMAGE}|g" \
     -e "s|__GPU_TIME_SLICING_REPLICAS__|${GPU_TIME_SLICING_REPLICAS}|g" \
